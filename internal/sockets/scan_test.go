@@ -239,3 +239,27 @@ func (v vanishingFS) Lstat(name string) (fs.FileInfo, error) {
 	}
 	return v.m.Lstat(name)
 }
+
+func TestScanAttributesUnreadablePodSocketsToNetnsPod(t *testing.T) {
+	fsys := vanishingFS{
+		m: procFS(
+			proc{pid: 1, comm: "systemd", cgroup: "0::/init.scope\n", netns: hostNS, net: hostNet()},
+			proc{pid: 300, comm: "kubelet", cgroup: kubelet, netns: hostNS},
+			proc{pid: 500, comm: "coredns", cgroup: cgroupV1(uidDNS, cidDNS), netns: podNS, net: podNet(),
+				fds: map[string]string{"5": "socket:[200]"}},
+		),
+		gone: map[string]bool{"500/fd": true},
+	}
+	got, err := Scan(fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range got {
+		switch {
+		case s.NetNS == "pod" && (s.PodUID != uidDNS || s.PID != 0 || s.ContainerID != ""):
+			t.Errorf("pod socket: %+v", s)
+		case s.NetNS == "host" && s.PodUID != "":
+			t.Errorf("host socket attributed to a pod: %+v", s)
+		}
+	}
+}

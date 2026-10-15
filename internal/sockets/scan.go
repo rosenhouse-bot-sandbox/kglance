@@ -69,22 +69,26 @@ func Scan(proc fs.FS) ([]Socket, error) {
 		}
 	}
 
-	procs := map[int]Socket{}
+	procs := processCache{proc: proc, info: map[int]Socket{}}
 	var out []Socket
 	for _, ns := range namespaces {
 		entries, err := readNetns(proc, nsPIDs[ns])
 		if err != nil {
 			return nil, err
 		}
+		kind := netnsKind(ns, hostNS)
+		netnsPod := ""
 		for _, e := range entries {
-			s := Socket{NetNS: netnsKind(ns, hostNS), Proto: e.Proto, Local: e.Local, Peer: e.Peer, State: e.State}
+			s := Socket{NetNS: kind, Proto: e.Proto, Local: e.Local, Peer: e.Peer, State: e.State}
 			if pid, ok := owner[e.Inode]; ok {
-				p, cached := procs[pid]
-				if !cached {
-					p = processInfo(proc, pid)
-					procs[pid] = p
-				}
+				p := procs.get(pid)
 				s.PID, s.Process, s.PodUID, s.ContainerID = p.PID, p.Process, p.PodUID, p.ContainerID
+			} else if kind == NetNSPod {
+				// Unreadable fds (e.g. without DAC_READ_SEARCH) still allow attribution to the pod owning the netns.
+				if netnsPod == "" {
+					netnsPod = procs.podOf(nsPIDs[ns])
+				}
+				s.PodUID = netnsPod
 			}
 			out = append(out, s)
 		}
@@ -156,6 +160,29 @@ func readNetns(proc fs.FS, pids []int) ([]netEntry, error) {
 		return all, nil
 	}
 	return nil, nil
+}
+
+type processCache struct {
+	proc fs.FS
+	info map[int]Socket
+}
+
+func (c processCache) get(pid int) Socket {
+	p, ok := c.info[pid]
+	if !ok {
+		p = processInfo(c.proc, pid)
+		c.info[pid] = p
+	}
+	return p
+}
+
+func (c processCache) podOf(pids []int) string {
+	for _, pid := range pids {
+		if uid := c.get(pid).PodUID; uid != "" {
+			return uid
+		}
+	}
+	return ""
 }
 
 func processInfo(proc fs.FS, pid int) Socket {
