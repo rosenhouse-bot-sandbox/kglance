@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -16,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 type Options struct {
@@ -71,15 +74,46 @@ func byState(ctx context.Context, o Options) error {
 		return fmt.Errorf("failed on %d of %d clusters; %s still records them", len(failed), len(names), o.StatePath)
 	}
 	fmt.Fprintln(o.Out, "done")
-	for _, p := range []string{o.StatePath, st.Kubeconfig} {
-		if p == "" {
-			continue
+	files := []string{o.StatePath}
+	if st.Kubeconfig != "" {
+		if isAgentKubeconfig(st.Kubeconfig, names) {
+			files = append(files, st.Kubeconfig)
+		} else {
+			fmt.Fprintf(o.Err, "warning: kept %s: not a kglance agent kubeconfig\n", st.Kubeconfig)
 		}
+	}
+	for _, p := range files {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+// isAgentKubeconfig reports whether path is missing or holds only token users for the given clusters.
+func isAgentKubeconfig(path string, clusters []string) bool {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	cfg, err := clientcmd.Load(data)
+	if err != nil || len(cfg.Contexts) == 0 {
+		return false
+	}
+	for name, c := range cfg.Contexts {
+		if !slices.Contains(clusters, name) || c.Cluster != name || c.AuthInfo != name {
+			return false
+		}
+	}
+	for name, u := range cfg.AuthInfos {
+		if cfg.Contexts[name] == nil || u.Token == "" || !reflect.DeepEqual(u, &clientcmdapi.AuthInfo{Token: u.Token, Extensions: u.Extensions}) {
+			return false
+		}
+	}
+	return true
 }
 
 // removeRecorded deletes c's recorded objects and returns those it skipped because kglance does not manage them.

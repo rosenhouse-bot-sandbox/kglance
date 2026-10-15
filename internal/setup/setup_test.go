@@ -571,3 +571,39 @@ func TestAgentKubeconfigOmitsAdminKubeconfigExtensions(t *testing.T) {
 		t.Errorf("kubeconfig %s", raw)
 	}
 }
+
+func TestRunRefusesToOverwriteAdminKubeconfig(t *testing.T) {
+	for _, field := range []string{"output", "state", "instructions"} {
+		t.Run(field, func(t *testing.T) {
+			h := newHarness(t)
+			admin := filepath.Join(h.dir, "admin")
+			if err := os.WriteFile(admin, []byte("admin"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(h.dir, "link")
+			if err := os.Symlink(admin, link); err != nil {
+				t.Fatal(err)
+			}
+			o := h.options(wl1)
+			o.AdminKubeconfigs = []string{"/nonexistent", admin}
+			switch field {
+			case "output":
+				o.KubeconfigPath = link
+			case "state":
+				o.StatePath = link
+			case "instructions":
+				o.InstructionsPath = link
+			}
+			err := Run(context.Background(), o)
+			if err == nil || !strings.Contains(err.Error(), "admin kubeconfig") {
+				t.Fatalf("err %v", err)
+			}
+			if b, _ := os.ReadFile(admin); string(b) != "admin" {
+				t.Errorf("admin kubeconfig changed: %q", b)
+			}
+			if _, err := h.clusters["wl1-ctx"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); err == nil {
+				t.Error("applied objects before refusing")
+			}
+		})
+	}
+}

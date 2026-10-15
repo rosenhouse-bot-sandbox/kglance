@@ -53,6 +53,7 @@ type Options struct {
 	Interval         time.Duration
 	Wait             time.Duration
 	PollInterval     time.Duration
+	AdminKubeconfigs []string
 	Connect          func(context string) (*kube.Conn, error)
 	Now              func() time.Time
 	Out, Err         io.Writer
@@ -97,6 +98,9 @@ type cluster struct {
 
 func Run(ctx context.Context, o Options) error {
 	if err := o.Validate(); err != nil {
+		return err
+	}
+	if err := o.refuseAdminKubeconfigOutputs(); err != nil {
 		return err
 	}
 	st, err := state.Load(o.StatePath)
@@ -144,6 +148,21 @@ func Run(ctx context.Context, o Options) error {
 		fmt.Fprintf(o.Out, "\nwrote %s\n", o.InstructionsPath)
 	}
 	return collectorErr
+}
+
+func (o *Options) refuseAdminKubeconfigOutputs() error {
+	for _, out := range []string{o.KubeconfigPath, o.StatePath, o.InstructionsPath} {
+		outInfo, err := os.Stat(out)
+		if err != nil {
+			continue
+		}
+		for _, admin := range o.AdminKubeconfigs {
+			if adminInfo, err := os.Stat(admin); err == nil && os.SameFile(outInfo, adminInfo) {
+				return fmt.Errorf("refusing to overwrite admin kubeconfig %s", out)
+			}
+		}
+	}
+	return nil
 }
 
 func names(clusters []*cluster) []string {

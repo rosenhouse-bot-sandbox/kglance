@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +92,17 @@ func TestRunDispatch(t *testing.T) {
 	errOut.Reset()
 	if code := run([]string{"setup"}, &bytes.Buffer{}, &errOut); code != 2 {
 		t.Errorf("setup without targets: %d %q", code, errOut.String())
+	}
+}
+
+func TestParseSetupRecordsAdminKubeconfigs(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/a"+string(os.PathListSeparator)+"/b")
+	o, _, err := parseSetup([]string{"--workload", "x"})
+	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/a", "/b"}) {
+		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
+	}
+	o, _, err = parseSetup([]string{"--workload", "x", "--kubeconfig", "/admin"})
+	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/admin"}) {
+		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
@@ -54,7 +55,7 @@ type harness struct {
 func newHarness(t *testing.T, names ...string) *harness {
 	h := &harness{dir: t.TempDir(), clusters: map[string]*fakeCluster{}}
 	h.st = &state.File{Version: state.Version, Kubeconfig: filepath.Join(h.dir, "agent.kubeconfig")}
-	os.WriteFile(h.st.Kubeconfig, []byte("x"), 0o600)
+	os.WriteFile(h.st.Kubeconfig, agentKubeconfig(names...), 0o600)
 	for _, name := range names {
 		fc := &fakeCluster{
 			cs: fake.NewClientset(
@@ -76,6 +77,20 @@ func newHarness(t *testing.T, names ...string) *harness {
 		h.st.Clusters = append(h.st.Clusters, rec)
 	}
 	return h
+}
+
+func agentKubeconfig(names ...string) []byte {
+	cfg := clientcmdapi.NewConfig()
+	for _, n := range names {
+		cfg.Clusters[n] = &clientcmdapi.Cluster{Server: "https://" + n + ":6443"}
+		cfg.AuthInfos[n] = &clientcmdapi.AuthInfo{Token: "tok"}
+		cfg.Contexts[n] = &clientcmdapi.Context{Cluster: n, AuthInfo: n}
+	}
+	b, err := clientcmd.Write(*cfg)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 func (h *harness) options(t *testing.T) Options {
@@ -246,5 +261,35 @@ func TestRunSkipsRecordedObjectsNotManagedByKglance(t *testing.T) {
 	}
 	if !strings.Contains(h.err.String(), "warning: skipped wl1: Namespace default: not managed by kglance\n") {
 		t.Errorf("stderr %q", h.err.String())
+	}
+}
+
+func TestRunKeepsRecordedKubeconfigThatIsNotAnAgentKubeconfig(t *testing.T) {
+	admin := `apiVersion: v1
+kind: Config
+clusters: [{name: wl1, cluster: {server: "https://wl1:6443"}}]
+users: [{name: admin, user: {client-certificate-data: Y2VydA==, client-key-data: a2V5}}]
+contexts: [{name: wl1, context: {cluster: wl1, user: admin}}]
+`
+	for name, content := range map[string]string{"admin": admin, "unparsable": "x", "unrecorded context": string(agentKubeconfig("wl1", "other"))} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, "wl1")
+			if err := os.WriteFile(h.st.Kubeconfig, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			o := h.options(t)
+			if err := Run(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			if b, _ := os.ReadFile(h.st.Kubeconfig); string(b) != content {
+				t.Error("kubeconfig removed")
+			}
+			if _, err := os.Stat(o.StatePath); !os.IsNotExist(err) {
+				t.Error("state not removed")
+			}
+			if !strings.Contains(h.err.String(), "kept "+h.st.Kubeconfig+": not a kglance agent kubeconfig") {
+				t.Errorf("stderr %q", h.err.String())
+			}
+		})
 	}
 }

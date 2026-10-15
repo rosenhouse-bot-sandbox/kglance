@@ -18,6 +18,7 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/setup"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/teardown"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const usage = `usage:
@@ -157,7 +158,15 @@ func parseSetup(args []string) (setup.Options, string, error) {
 	if o.StatePath, err = absPath(o.StatePath); err != nil {
 		return o, "", err
 	}
+	o.AdminKubeconfigs = adminKubeconfigs(kubeconfig)
 	return o, kubeconfig, nil
+}
+
+func adminKubeconfigs(explicit string) []string {
+	if explicit != "" {
+		return []string{explicit}
+	}
+	return clientcmd.NewDefaultClientConfigLoadingRules().GetLoadingPrecedence()
 }
 
 func parseTeardown(args []string) (teardown.Options, string, error) {
