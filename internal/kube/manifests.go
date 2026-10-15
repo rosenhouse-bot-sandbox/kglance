@@ -47,9 +47,11 @@ func meta(kind, apiVersion, namespace, name string) (metav1.TypeMeta, metav1.Obj
 		metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{ManagedByLabel: ManagedByValue}}
 }
 
-func NamespaceObject() *corev1.Namespace {
+func NamespaceObject(privileged bool) *corev1.Namespace {
 	tm, om := meta("Namespace", "v1", "", Namespace)
-	om.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
+	if privileged {
+		om.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
+	}
 	return &corev1.Namespace{TypeMeta: tm, ObjectMeta: om}
 }
 
@@ -212,7 +214,7 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 
 func MgmtObjects() []Object {
 	return []Object{
-		NamespaceObject(),
+		NamespaceObject(false),
 		ServiceAccount(AgentSA),
 		AgentCAPIClusterRole(),
 		ClusterRoleBinding(AgentCAPIRole, AgentSA),
@@ -221,7 +223,7 @@ func MgmtObjects() []Object {
 
 func WorkloadObjects(viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Object {
 	return []Object{
-		NamespaceObject(),
+		NamespaceObject(true),
 		ServiceAccount(AgentSA),
 		ServiceAccount(CollectorSA),
 		AgentViewClusterRole(viewRules),

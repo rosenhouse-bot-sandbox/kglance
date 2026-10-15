@@ -141,10 +141,15 @@ func TestBindingsTargetServiceAccountInNamespace(t *testing.T) {
 	}
 }
 
-func TestNamespaceAllowsPrivilegedPods(t *testing.T) {
-	ns := NamespaceObject()
-	if ns.Name != Namespace || ns.Labels["pod-security.kubernetes.io/enforce"] != "privileged" {
-		t.Errorf("%+v", ns)
+func TestOnlyWorkloadNamespaceAllowsPrivilegedPods(t *testing.T) {
+	const psa = "pod-security.kubernetes.io/enforce"
+	wl := WorkloadObjects(nil, DaemonSetOptions{Image: "i", Interval: time.Minute})[0].(*corev1.Namespace)
+	if wl.Name != Namespace || wl.Labels[psa] != "privileged" {
+		t.Errorf("workload %+v", wl)
+	}
+	mgmt := MgmtObjects()[0].(*corev1.Namespace)
+	if _, ok := mgmt.Labels[psa]; mgmt.Name != Namespace || ok {
+		t.Errorf("mgmt %+v", mgmt)
 	}
 }
 
