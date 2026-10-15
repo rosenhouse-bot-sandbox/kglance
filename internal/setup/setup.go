@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -107,12 +108,12 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	for _, c := range clusters {
-		if err := install(ctx, o, c); err != nil {
-			return fmt.Errorf("%s: %w", c.Name, err)
+		record := func() error {
+			st.Put(c.record)
+			return state.Save(o.StatePath, st)
 		}
-		st.Put(c.record)
-		if err := state.Save(o.StatePath, st); err != nil {
-			return err
+		if err := install(ctx, o, c, record); err != nil {
+			return fmt.Errorf("%s: %w; run kglance teardown to remove what was applied", c.Name, err)
 		}
 	}
 	expiry, err := mintTokens(ctx, o, clusters)
@@ -181,6 +182,8 @@ func connectAll(o Options, st *state.File) ([]*cluster, error) {
 				return nil, fmt.Errorf("%s: recorded as %s, not %s; run kglance teardown first", t.Name, rec.Role, t.Role)
 			case rec.Name != t.Name && sameCluster:
 				return nil, fmt.Errorf("%s: same cluster is already recorded as %s", t.Name, rec.Name)
+			case rec.Name == t.Name:
+				c.record.Objects = slices.Clone(rec.Objects)
 			}
 		}
 		out = append(out, c)
@@ -188,7 +191,8 @@ func connectAll(o Options, st *state.File) ([]*cluster, error) {
 	return out, nil
 }
 
-func install(ctx context.Context, o Options, c *cluster) error {
+// install applies c's objects and calls record after each one so that a partial install is recorded.
+func install(ctx context.Context, o Options, c *cluster, record func() error) error {
 	if err := waitNamespaceGoneIfTerminating(ctx, o, c); err != nil {
 		return err
 	}
@@ -205,9 +209,13 @@ func install(ctx context.Context, o Options, c *cluster) error {
 			return err
 		}
 		gvk := obj.GetObjectKind().GroupVersionKind()
-		c.record.Objects = append(c.record.Objects, state.Object{
-			APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName(),
-		})
+		applied := state.Object{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
+		if !slices.Contains(c.record.Objects, applied) {
+			c.record.Objects = append(c.record.Objects, applied)
+		}
+		if err := record(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

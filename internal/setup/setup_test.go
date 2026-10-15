@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -273,6 +274,9 @@ func TestRerunKeepsRecordedClustersNotGivenAgain(t *testing.T) {
 	if len(st.Clusters) != 2 || st.Find("wl2") == nil {
 		t.Fatalf("clusters %+v", st.Clusters)
 	}
+	if n := len(st.Find("wl1").Objects); n != 12 {
+		t.Errorf("wl1 records %d objects", n)
+	}
 	if n := len(h.clusters["wl1-ctx"].tokenTTLs); n != 2 {
 		t.Errorf("wl1 minted %d tokens", n)
 	}
@@ -430,5 +434,45 @@ func TestInstructionsGiveSnapshotCommandPerWorkload(t *testing.T) {
 	}
 	if strings.Contains(got, "--context mgmt") {
 		t.Errorf("mgmt command:\n%s", got)
+	}
+}
+
+func failDaemonSetApply(fc *fakeCluster) {
+	fc.cs.PrependReactor("patch", "daemonsets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("denied: hostPID is not allowed")
+	})
+}
+
+func TestRunRecordsObjectsAppliedBeforeAFailure(t *testing.T) {
+	h := newHarness(t)
+	failDaemonSetApply(h.clusters["wl1-ctx"])
+	o := h.options(wl1)
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "hostPID") || !strings.Contains(err.Error(), "kglance teardown") {
+		t.Fatalf("err %v", err)
+	}
+	st, err := state.Load(o.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := st.Find("wl1")
+	if rec == nil || len(rec.Objects) != 11 || rec.Objects[0].Kind != "Namespace" || rec.Objects[10].Kind != "RoleBinding" {
+		t.Fatalf("record %+v", rec)
+	}
+}
+
+func TestRerunFailureKeepsPreviouslyRecordedObjects(t *testing.T) {
+	h := newHarness(t)
+	o := h.options(wl1)
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	failDaemonSetApply(h.clusters["wl1-ctx"])
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("expected error")
+	}
+	st, _ := state.Load(o.StatePath)
+	if objs := st.Find("wl1").Objects; len(objs) != 12 || objs[11].Kind != "DaemonSet" {
+		t.Fatalf("objects %+v", objs)
 	}
 }
