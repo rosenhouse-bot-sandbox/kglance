@@ -90,7 +90,7 @@ func RoleBinding(name, sa string) *rbacv1.RoleBinding {
 var forbiddenSubresources = []string{"log", "exec", "attach", "portforward", "proxy"}
 
 func allowedResource(r string) bool {
-	if r == "*" || r == "secrets" || strings.HasPrefix(r, "secrets/") {
+	if strings.Contains(r, "*") || r == "secrets" || strings.HasPrefix(r, "secrets/") {
 		return false
 	}
 	_, sub, ok := strings.Cut(r, "/")
@@ -106,6 +106,9 @@ func FilterViewRules(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
 		}
 		res := slices.DeleteFunc(slices.Clone(r.Resources), func(s string) bool { return !allowedResource(s) })
 		verbs := slices.DeleteFunc(slices.Clone(r.Verbs), func(v string) bool { return !slices.Contains(readVerbs, v) })
+		if slices.Contains(r.Verbs, "*") {
+			verbs = slices.Clone(readVerbs)
+		}
 		if len(res) == 0 || len(verbs) == 0 {
 			continue
 		}

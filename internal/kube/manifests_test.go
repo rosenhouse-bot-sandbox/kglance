@@ -15,11 +15,13 @@ func TestFilterViewRulesDropsDangerousSubresourcesSecretsAndWriteVerbs(t *testin
 		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get", "list", "watch", "create", "delete"}},
 		{APIGroups: []string{"x"}, Resources: []string{"pods/log"}, Verbs: []string{"get"}},
 		{APIGroups: []string{"y"}, Resources: []string{"things"}, Verbs: []string{"update"}},
+		{APIGroups: []string{"z"}, Resources: []string{"pods/*", "*/*", "*/status", "widgets"}, Verbs: []string{"get"}},
 	}
 	got := FilterViewRules(in)
 	want := []rbacv1.PolicyRule{
 		{APIGroups: []string{""}, Resources: []string{"pods", "pods/status"}, Verbs: []string{"get", "list", "watch"}},
 		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"get", "list", "watch"}},
+		{APIGroups: []string{"z"}, Resources: []string{"widgets"}, Verbs: []string{"get"}},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %+v", got)
@@ -34,13 +36,19 @@ func TestFilterViewRulesDropsDangerousSubresourcesSecretsAndWriteVerbs(t *testin
 	}
 }
 
-func TestFilterViewRulesDropsWildcards(t *testing.T) {
+func TestFilterViewRulesDropsWildcardResources(t *testing.T) {
 	got := FilterViewRules([]rbacv1.PolicyRule{
 		{APIGroups: []string{""}, Resources: []string{"*"}, Verbs: []string{"get"}},
-		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"*"}},
 		{NonResourceURLs: []string{"/healthz"}, Verbs: []string{"get"}},
 	})
 	if len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestFilterViewRulesReducesWildcardVerbToReadVerbs(t *testing.T) {
+	got := FilterViewRules([]rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"*"}}})
+	if len(got) != 1 || !slices.Equal(got[0].Verbs, []string{"get", "list", "watch"}) {
 		t.Fatalf("got %+v", got)
 	}
 }
