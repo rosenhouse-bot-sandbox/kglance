@@ -230,3 +230,21 @@ func TestRunByContextDeletesLabelledObjectsOnly(t *testing.T) {
 		t.Errorf("out %q", h.out.String())
 	}
 }
+
+func TestRunSkipsRecordedObjectsNotManagedByKglance(t *testing.T) {
+	h := newHarness(t, "wl1")
+	h.st.Clusters[0].Objects = append(h.st.Clusters[0].Objects,
+		state.Object{APIVersion: "v1", Kind: "Namespace", Name: "default"},
+		state.Object{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "unrelated"})
+	if err := Run(context.Background(), h.options(t)); err != nil {
+		t.Fatalf("%v\n%s", err, h.err.String())
+	}
+	cs := h.clusters["wl1-ctx"].cs
+	unrelatedIntact(t, cs)
+	if installed(t, cs) {
+		t.Error("still installed")
+	}
+	if !strings.Contains(h.err.String(), "warning: skipped wl1: Namespace default: not managed by kglance\n") {
+		t.Errorf("stderr %q", h.err.String())
+	}
+}

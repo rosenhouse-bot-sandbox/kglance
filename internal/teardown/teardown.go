@@ -47,12 +47,20 @@ func byState(ctx context.Context, o Options) error {
 	}
 	fmt.Fprintf(o.Out, "read %s: removing kglance from %s ... ", o.StatePath, strings.Join(names, ", "))
 	var failed []state.Cluster
+	var skipped []string
 	for _, c := range st.Clusters {
-		if err := removeRecorded(ctx, o, c); err != nil {
+		s, err := removeRecorded(ctx, o, c)
+		skipped = append(skipped, s...)
+		if err != nil {
 			fmt.Fprintf(o.Err, "\n%s: %v", c.Name, err)
 			failed = append(failed, c)
 		}
 	}
+	defer func() {
+		for _, s := range skipped {
+			fmt.Fprintf(o.Err, "warning: skipped %s: not managed by kglance\n", s)
+		}
+	}()
 	if len(failed) > 0 {
 		fmt.Fprintln(o.Err)
 		fmt.Fprintln(o.Out, "failed")
@@ -74,25 +82,34 @@ func byState(ctx context.Context, o Options) error {
 	return nil
 }
 
-func removeRecorded(ctx context.Context, o Options, c state.Cluster) error {
+// removeRecorded deletes c's recorded objects and returns those it skipped because kglance does not manage them.
+func removeRecorded(ctx context.Context, o Options, c state.Cluster) (skipped []string, err error) {
 	conn, err := o.Connect(c.Context)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fp, err := state.Fingerprint(conn.Cluster.CertificateAuthorityData)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if conn.Cluster.Server != c.Server || fp != c.CAFingerprint {
-		return fmt.Errorf("context %s does not match the recorded cluster (server %s, CA %.12s; now %s, CA %.12s); deleted nothing",
+		return nil, fmt.Errorf("context %s does not match the recorded cluster (server %s, CA %.12s; now %s, CA %.12s); deleted nothing",
 			c.Context, c.Server, c.CAFingerprint, conn.Cluster.Server, fp)
 	}
 	for _, obj := range slices.Backward(c.Objects) {
+		exists, managed, err := kube.Managed(ctx, conn.Client, obj.Kind, obj.Namespace, obj.Name)
+		if err != nil {
+			return skipped, err
+		}
+		if exists && !managed {
+			skipped = append(skipped, fmt.Sprintf("%s: %s %s", c.Name, obj.Kind, obj.Name))
+			continue
+		}
 		if err := kube.Delete(ctx, conn.Client, obj.Kind, obj.Namespace, obj.Name); err != nil {
-			return err
+			return skipped, err
 		}
 	}
-	return nil
+	return skipped, nil
 }
 
 func byLabel(ctx context.Context, o Options) error {

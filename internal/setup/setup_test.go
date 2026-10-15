@@ -476,3 +476,28 @@ func TestRerunFailureKeepsPreviouslyRecordedObjects(t *testing.T) {
 		t.Fatalf("objects %+v", objs)
 	}
 }
+
+func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
+	cases := map[string]metav1.Object{
+		"Namespace kglance":              &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace}},
+		"ClusterRole kglance-agent-view": &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: map[string]string{"x": "y"}}},
+		"DaemonSet kglance-collector":    &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: kube.CollectorDS, Namespace: kube.Namespace}},
+	}
+	for name, existing := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			fc := h.clusters["wl1-ctx"]
+			fc.cs.Tracker().Add(existing.(runtime.Object))
+			err := Run(context.Background(), h.options(wl1))
+			if err == nil || !strings.Contains(err.Error(), name+" exists and is not managed by kglance") {
+				t.Fatalf("err %v", err)
+			}
+			for _, a := range fc.cs.Actions() {
+				if p, ok := a.(k8stesting.PatchAction); ok && p.GetName() == existing.GetName() && p.GetNamespace() == existing.GetNamespace() &&
+					strings.EqualFold(a.GetResource().Resource, strings.Fields(name)[0]+"s") {
+					t.Errorf("patched %s", name)
+				}
+			}
+		})
+	}
+}

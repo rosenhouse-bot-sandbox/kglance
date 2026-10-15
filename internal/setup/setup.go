@@ -205,6 +205,14 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 		objs = kube.WorkloadObjects(view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval})
 	}
 	for _, obj := range objs {
+		kind := obj.GetObjectKind().GroupVersionKind().Kind
+		exists, managed, err := kube.Managed(ctx, c.conn.Client, kind, obj.GetNamespace(), obj.GetName())
+		if err != nil {
+			return err
+		}
+		if exists && !managed {
+			return fmt.Errorf("%s %s exists and is not managed by kglance", kind, obj.GetName())
+		}
 		if err := kube.Apply(ctx, c.conn.Client, obj); err != nil {
 			return err
 		}

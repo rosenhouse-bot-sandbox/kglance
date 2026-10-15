@@ -44,6 +44,37 @@ func Apply(ctx context.Context, cs kubernetes.Interface, obj Object) error {
 	return nil
 }
 
+// Managed reports whether an object exists and whether it carries the managed-by=kglance label.
+func Managed(ctx context.Context, cs kubernetes.Interface, kind, ns, name string) (exists, managed bool, err error) {
+	var obj metav1.Object
+	opts := metav1.GetOptions{}
+	switch kind {
+	case "Namespace":
+		obj, err = cs.CoreV1().Namespaces().Get(ctx, name, opts)
+	case "ServiceAccount":
+		obj, err = cs.CoreV1().ServiceAccounts(ns).Get(ctx, name, opts)
+	case "ClusterRole":
+		obj, err = cs.RbacV1().ClusterRoles().Get(ctx, name, opts)
+	case "ClusterRoleBinding":
+		obj, err = cs.RbacV1().ClusterRoleBindings().Get(ctx, name, opts)
+	case "Role":
+		obj, err = cs.RbacV1().Roles(ns).Get(ctx, name, opts)
+	case "RoleBinding":
+		obj, err = cs.RbacV1().RoleBindings(ns).Get(ctx, name, opts)
+	case "DaemonSet":
+		obj, err = cs.AppsV1().DaemonSets(ns).Get(ctx, name, opts)
+	default:
+		return false, false, fmt.Errorf("get: unsupported kind %s", kind)
+	}
+	if apierrors.IsNotFound(err) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("get %s %s: %w", kind, name, err)
+	}
+	return true, obj.GetLabels()[ManagedByLabel] == ManagedByValue, nil
+}
+
 // Delete removes one object; NotFound counts as success.
 func Delete(ctx context.Context, cs kubernetes.Interface, kind, ns, name string) error {
 	var err error
