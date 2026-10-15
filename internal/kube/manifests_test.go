@@ -183,7 +183,7 @@ func TestDaemonSetContract(t *testing.T) {
 		sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation || (sc.Privileged != nil && *sc.Privileged) {
 		t.Errorf("security context %+v", sc)
 	}
-	if sc.Capabilities == nil || !slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) || !slices.Equal(sc.Capabilities.Add, []corev1.Capability{"SYS_PTRACE"}) {
+	if sc.Capabilities == nil || !slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) || !slices.Equal(sc.Capabilities.Add, []corev1.Capability{"SYS_PTRACE", "DAC_READ_SEARCH"}) {
 		t.Errorf("capabilities %+v", sc.Capabilities)
 	}
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {

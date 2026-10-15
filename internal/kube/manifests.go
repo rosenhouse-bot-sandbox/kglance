@@ -185,7 +185,7 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 						RunAsUser:                &root,
 						ReadOnlyRootFilesystem:   &yes,
 						AllowPrivilegeEscalation: &no,
-						Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"SYS_PTRACE"}},
+						Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"SYS_PTRACE", "DAC_READ_SEARCH"}},
 						SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 				}},
