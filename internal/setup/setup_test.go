@@ -52,6 +52,7 @@ type fakeCluster struct {
 	tokenTTLs []int64
 	ready     bool
 	stale     bool
+	status    func(*appsv1.DaemonSetStatus)
 }
 
 func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCluster {
@@ -94,6 +95,9 @@ func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCl
 		}
 		if fc.stale {
 			ds.Generation, ds.Status.ObservedGeneration = 2, 1
+		}
+		if fc.status != nil {
+			fc.status(&ds.Status)
 		}
 		return true, ds, nil
 	})
@@ -345,6 +349,32 @@ func TestRunReportsCollectorNotReadyWhileStatusIsStale(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(h.err.String(), "wl1: socket collector ready on 2/2 nodes after 20ms") {
+		t.Errorf("stderr %q", h.err.String())
+	}
+}
+
+func TestRunReportsCollectorNotReadyWhileOldPodsRemain(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["wl1-ctx"].status = func(s *appsv1.DaemonSetStatus) { s.UpdatedNumberScheduled = 1 }
+	o := h.options(wl1)
+	o.Wait = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(h.err.String(), "wl1: socket collector ready on 2/2 nodes after 20ms") {
+		t.Errorf("stderr %q", h.err.String())
+	}
+}
+
+func TestRunReportsCollectorNotReadyWhenScheduledOnNoNodes(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["wl1-ctx"].status = func(s *appsv1.DaemonSetStatus) { *s = appsv1.DaemonSetStatus{} }
+	o := h.options(wl1)
+	o.Wait = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(h.err.String(), "wl1: socket collector ready on 0/0 nodes after 20ms") {
 		t.Errorf("stderr %q", h.err.String())
 	}
 }
