@@ -13,7 +13,9 @@ import (
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 type Options struct {
@@ -58,7 +60,7 @@ func byState(ctx context.Context, o Options) error {
 		if err := state.Save(o.StatePath, st); err != nil {
 			return err
 		}
-		return fmt.Errorf("teardown failed on %d of %d clusters; %s keeps them", len(failed), len(names), o.StatePath)
+		return fmt.Errorf("failed on %d of %d clusters; %s still records them", len(failed), len(names), o.StatePath)
 	}
 	fmt.Fprintln(o.Out, "done")
 	for _, p := range []string{o.StatePath, st.Kubeconfig} {
@@ -117,65 +119,38 @@ func removeLabelled(ctx context.Context, o Options, kctx string) error {
 	if err != nil {
 		return err
 	}
-	cs := conn.Client
+	cs, ns := conn.Client, kube.Namespace
 	sel := metav1.ListOptions{LabelSelector: kube.ManagedByLabel + "=" + kube.ManagedByValue}
-	type ref struct{ kind, ns, name string }
-	var refs []ref
-	add := func(kind string, items []metav1.Object) {
-		for _, it := range items {
-			refs = append(refs, ref{kind, it.GetNamespace(), it.GetName()})
-		}
+	listers := []struct {
+		kind string
+		list func() (runtime.Object, error)
+	}{
+		{"DaemonSet", func() (runtime.Object, error) { return cs.AppsV1().DaemonSets(ns).List(ctx, sel) }},
+		{"RoleBinding", func() (runtime.Object, error) { return cs.RbacV1().RoleBindings(ns).List(ctx, sel) }},
+		{"Role", func() (runtime.Object, error) { return cs.RbacV1().Roles(ns).List(ctx, sel) }},
+		{"ClusterRoleBinding", func() (runtime.Object, error) { return cs.RbacV1().ClusterRoleBindings().List(ctx, sel) }},
+		{"ClusterRole", func() (runtime.Object, error) { return cs.RbacV1().ClusterRoles().List(ctx, sel) }},
+		{"ServiceAccount", func() (runtime.Object, error) { return cs.CoreV1().ServiceAccounts(ns).List(ctx, sel) }},
+		{"Namespace", func() (runtime.Object, error) { return cs.CoreV1().Namespaces().List(ctx, sel) }},
 	}
-	if l, err := cs.AppsV1().DaemonSets(kube.Namespace).List(ctx, sel); err == nil {
-		add("DaemonSet", ptrs(l.Items))
-	} else {
-		return err
-	}
-	if l, err := cs.RbacV1().RoleBindings(kube.Namespace).List(ctx, sel); err == nil {
-		add("RoleBinding", ptrs(l.Items))
-	} else {
-		return err
-	}
-	if l, err := cs.RbacV1().Roles(kube.Namespace).List(ctx, sel); err == nil {
-		add("Role", ptrs(l.Items))
-	} else {
-		return err
-	}
-	if l, err := cs.RbacV1().ClusterRoleBindings().List(ctx, sel); err == nil {
-		add("ClusterRoleBinding", ptrs(l.Items))
-	} else {
-		return err
-	}
-	if l, err := cs.RbacV1().ClusterRoles().List(ctx, sel); err == nil {
-		add("ClusterRole", ptrs(l.Items))
-	} else {
-		return err
-	}
-	if l, err := cs.CoreV1().ServiceAccounts(kube.Namespace).List(ctx, sel); err == nil {
-		add("ServiceAccount", ptrs(l.Items))
-	} else {
-		return err
-	}
-	if l, err := cs.CoreV1().Namespaces().List(ctx, sel); err == nil {
-		add("Namespace", ptrs(l.Items))
-	} else {
-		return err
-	}
-	for _, r := range refs {
-		if err := kube.Delete(ctx, cs, r.kind, r.ns, r.name); err != nil {
+	for _, l := range listers {
+		list, err := l.list()
+		if err != nil {
 			return err
+		}
+		items, err := meta.ExtractList(list)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			m, err := meta.Accessor(item)
+			if err != nil {
+				return err
+			}
+			if err := kube.Delete(ctx, cs, l.kind, m.GetNamespace(), m.GetName()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
-}
-
-func ptrs[T any, P interface {
-	*T
-	metav1.Object
-}](items []T) []metav1.Object {
-	out := make([]metav1.Object, len(items))
-	for i := range items {
-		out[i] = P(&items[i])
-	}
-	return out
 }

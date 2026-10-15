@@ -13,6 +13,7 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	authv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -188,6 +189,9 @@ func connectAll(o Options, st *state.File) ([]*cluster, error) {
 }
 
 func install(ctx context.Context, o Options, c *cluster) error {
+	if err := waitNamespaceGoneIfTerminating(ctx, o, c); err != nil {
+		return err
+	}
 	objs := kube.MgmtObjects()
 	if c.Role == state.RoleWorkload {
 		view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
@@ -206,6 +210,37 @@ func install(ctx context.Context, o Options, c *cluster) error {
 		})
 	}
 	return nil
+}
+
+const terminatingTimeout = 2 * time.Minute
+
+func waitNamespaceGoneIfTerminating(ctx context.Context, o Options, c *cluster) error {
+	deadline := time.Now().Add(terminatingTimeout)
+	warned := false
+	for {
+		ns, err := c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if ns.DeletionTimestamp == nil {
+			return nil
+		}
+		if !warned {
+			fmt.Fprintf(o.Err, "%s: waiting for namespace %s to finish terminating\n", c.Name, kube.Namespace)
+			warned = true
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("namespace %s still terminating after %v", kube.Namespace, terminatingTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(o.PollInterval):
+		}
+	}
 }
 
 // mintTokens returns the earliest token expiry.

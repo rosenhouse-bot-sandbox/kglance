@@ -27,12 +27,12 @@ func reportCollectors(ctx context.Context, o Options, clusters []*cluster) error
 	deadline := time.Now().Add(o.Wait)
 	var controlPlane, workers int
 	var notReady []string
-	any := false
+	hasWorkload := false
 	for _, c := range clusters {
 		if c.Role != state.RoleWorkload {
 			continue
 		}
-		any = true
+		hasWorkload = true
 		ds, err := waitRollout(ctx, o, c, deadline)
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
@@ -48,7 +48,7 @@ func reportCollectors(ctx context.Context, o Options, clusters []*cluster) error
 		}
 		controlPlane, workers = controlPlane+cp, workers+w
 	}
-	if !any {
+	if !hasWorkload {
 		return nil
 	}
 	fmt.Fprintf(o.Out, "socket collector running on %d nodes (%d control-plane, %d worker)\n", controlPlane+workers, controlPlane, workers)

@@ -393,3 +393,27 @@ func TestInstructionsForMgmtOnlyOmitSnapshotCommand(t *testing.T) {
 		t.Errorf("%s", got)
 	}
 }
+
+func TestRunWaitsForTerminatingNamespace(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1-ctx"]
+	deleting := metav1.NewTime(now)
+	fc.cs.Tracker().Add(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace, DeletionTimestamp: &deleting, Finalizers: []string{"kubernetes"}}})
+	gets := 0
+	fc.cs.PrependReactor("get", "namespaces", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if gets++; gets == 3 {
+			fc.cs.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("namespaces"), "", kube.Namespace)
+		}
+		return false, nil, nil
+	})
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	if gets < 3 || !strings.Contains(h.err.String(), "wl1: waiting for namespace kglance to finish terminating") {
+		t.Errorf("gets %d stderr %q", gets, h.err.String())
+	}
+	ns, err := fc.cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{})
+	if err != nil || ns.DeletionTimestamp != nil {
+		t.Fatalf("%+v %v", ns, err)
+	}
+}
