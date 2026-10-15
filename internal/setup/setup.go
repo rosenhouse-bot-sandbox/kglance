@@ -113,6 +113,9 @@ func Run(ctx context.Context, o Options) error {
 			return state.Save(o.StatePath, st)
 		}
 		if err := install(ctx, o, c, record); err != nil {
+			if len(c.record.Objects) == 0 {
+				return fmt.Errorf("%s: %w", c.Name, err)
+			}
 			return fmt.Errorf("%s: %w; run kglance teardown to remove what was applied", c.Name, err)
 		}
 	}

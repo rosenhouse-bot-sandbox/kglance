@@ -492,6 +492,9 @@ func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), name+" exists and is not managed by kglance") {
 				t.Fatalf("err %v", err)
 			}
+			if appliedNothing := name == "Namespace kglance"; appliedNothing == strings.Contains(err.Error(), "teardown") {
+				t.Errorf("teardown hint wrong: %v", err)
+			}
 			for _, a := range fc.cs.Actions() {
 				if p, ok := a.(k8stesting.PatchAction); ok && p.GetName() == existing.GetName() && p.GetNamespace() == existing.GetNamespace() &&
 					strings.EqualFold(a.GetResource().Resource, strings.Fields(name)[0]+"s") {
