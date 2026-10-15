@@ -316,3 +316,15 @@ func TestSnapshotMarksTruncatedSocketsJSONL(t *testing.T) {
 		t.Errorf("stale annotation %v", cm.Annotations)
 	}
 }
+
+func TestPodIndexResolvesEveryContainerKind(t *testing.T) {
+	p := pod("ns", "p", uidDNS, "cp1", map[string]string{"main": cidDNS})
+	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "init", ContainerID: "containerd://" + cidProxy}}
+	p.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{Name: "debug", ContainerID: "cri-o://" + cidAPI}}
+	idx := newPodIndex([]corev1.Pod{*p})
+	for cid, want := range map[string]string{cidDNS: "main", cidProxy: "init", cidAPI: "debug"} {
+		if pod, container := idx.resolve(uidDNS, cid); pod != "ns/p" || container != want {
+			t.Errorf("%s: got %s %s want %s", cid, pod, container, want)
+		}
+	}
+}

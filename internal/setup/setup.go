@@ -284,7 +284,7 @@ func agentKubeconfig(clusters []*cluster) []byte {
 	cfg := clientcmdapi.NewConfig()
 	for _, c := range clusters {
 		entry := c.conn.Cluster.DeepCopy()
-		entry.LocationOfOrigin, entry.Extensions = "", nil
+		entry.Extensions = nil
 		cfg.Clusters[c.Name] = entry
 		cfg.AuthInfos[c.Name] = &clientcmdapi.AuthInfo{Token: c.token}
 		cfg.Contexts[c.Name] = &clientcmdapi.Context{Cluster: c.Name, AuthInfo: c.Name}

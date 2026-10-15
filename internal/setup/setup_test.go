@@ -501,3 +501,53 @@ func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 		})
 	}
 }
+
+func TestRunRefusesRenamingARecordedCluster(t *testing.T) {
+	h := newHarness(t)
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	renamed := Target{Name: "renamed", Role: state.RoleWorkload, Context: "wl1-ctx"}
+	if err := Run(context.Background(), h.options(renamed)); err == nil || !strings.Contains(err.Error(), "already recorded as wl1") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestRunCountsOnlyReadyCollectorPods(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1-ctx"]
+	fc.cs.Tracker().Add(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "w2"}})
+	fc.cs.Tracker().Add(collectorPod("p3", "w2", false))
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.out.String(), "socket collector running on 2 nodes (1 control-plane, 1 worker)") {
+		t.Errorf("out %q", h.out.String())
+	}
+}
+
+func TestRunUsesEarliestTokenExpiry(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["wl1-ctx"] = newFakeCluster(t, "https://wl1:6443", 30*time.Minute)
+	o := h.options(wl1, wl2)
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(o.StatePath)
+	if !st.Expiry.Equal(now.Add(30*time.Minute)) || !strings.Contains(h.out.String(), "expires 18:40 UTC") {
+		t.Errorf("expiry %v out %q", st.Expiry, h.out.String())
+	}
+}
+
+func TestAgentKubeconfigOmitsAdminKubeconfigExtensions(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["wl1-ctx"].conn.Cluster.Extensions = map[string]runtime.Object{"admin-ext": &runtime.Unknown{Raw: []byte(`{"secret":"x"}`)}}
+	o := h.options(wl1)
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(o.KubeconfigPath)
+	if strings.Contains(string(raw), "admin-ext") {
+		t.Errorf("kubeconfig %s", raw)
+	}
+}
