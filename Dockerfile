@@ -1,0 +1,11 @@
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags=-s -o /kglance ./cmd/kglance
+
+# The collector runs as uid 0 (set by the DaemonSet) to read /proc of other processes.
+FROM gcr.io/distroless/static:latest
+COPY --from=build /kglance /kglance
+ENTRYPOINT ["/kglance"]
