@@ -51,6 +51,7 @@ type fakeCluster struct {
 	conn      *kube.Conn
 	tokenTTLs []int64
 	ready     bool
+	stale     bool
 }
 
 func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCluster {
@@ -90,6 +91,9 @@ func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCl
 		ds.Status = appsv1.DaemonSetStatus{DesiredNumberScheduled: 2, UpdatedNumberScheduled: 2, NumberReady: 1, NumberAvailable: 1}
 		if fc.ready {
 			ds.Status.NumberReady, ds.Status.NumberAvailable = 2, 2
+		}
+		if fc.stale {
+			ds.Generation, ds.Status.ObservedGeneration = 2, 1
 		}
 		return true, ds, nil
 	})
@@ -329,6 +333,19 @@ func TestRunReportsCollectorNotReady(t *testing.T) {
 	}
 	if _, serr := os.Stat(h.options().KubeconfigPath); serr != nil {
 		t.Error("kubeconfig not written")
+	}
+}
+
+func TestRunReportsCollectorNotReadyWhileStatusIsStale(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["wl1-ctx"].stale = true
+	o := h.options(wl1)
+	o.Wait = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(h.err.String(), "wl1: socket collector ready on 2/2 nodes after 20ms") {
+		t.Errorf("stderr %q", h.err.String())
 	}
 }
 

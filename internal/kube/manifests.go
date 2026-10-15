@@ -181,6 +181,7 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 				HostNetwork:                   true,
 				HostPID:                       true,
 				DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
+				NodeSelector:                  map[string]string{corev1.LabelOSStable: "linux"},
 				Tolerations:                   []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 				TerminationGracePeriodSeconds: &grace,
 				Containers: []corev1.Container{{

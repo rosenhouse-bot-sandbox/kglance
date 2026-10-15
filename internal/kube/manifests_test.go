@@ -163,6 +163,9 @@ func TestDaemonSetContract(t *testing.T) {
 	if len(p.Tolerations) != 1 || p.Tolerations[0].Operator != corev1.TolerationOpExists || p.Tolerations[0].Key != "" {
 		t.Errorf("tolerations %+v", p.Tolerations)
 	}
+	if len(p.NodeSelector) != 1 || p.NodeSelector["kubernetes.io/os"] != "linux" {
+		t.Errorf("node selector %v", p.NodeSelector)
+	}
 	if len(p.Volumes) != 0 {
 		t.Error("volumes present")
 	}
