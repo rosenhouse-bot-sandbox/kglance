@@ -23,7 +23,10 @@ func TestRowJSONFieldOrder(t *testing.T) {
 }
 
 func TestRender(t *testing.T) {
-	jsonl, raw := Render(sampleRows, 1<<20)
+	jsonl, raw, kept := Render(sampleRows, 1<<20)
+	if kept != 2 {
+		t.Errorf("kept %d", kept)
+	}
 	lines := strings.Split(strings.TrimSuffix(jsonl, "\n"), "\n")
 	if len(lines) != 2 || !strings.HasSuffix(jsonl, "\n") {
 		t.Fatalf("jsonl: %q", jsonl)
@@ -52,10 +55,10 @@ func TestRender(t *testing.T) {
 }
 
 func TestRenderTruncatesRawFirst(t *testing.T) {
-	jsonl, _ := Render(sampleRows, 1<<20)
+	jsonl, _, _ := Render(sampleRows, 1<<20)
 	limit := len(jsonl) + 60
-	gotJSONL, raw := Render(sampleRows, limit)
-	if gotJSONL != jsonl {
+	gotJSONL, raw, kept := Render(sampleRows, limit)
+	if gotJSONL != jsonl || kept != 2 {
 		t.Errorf("jsonl changed: %q", gotJSONL)
 	}
 	if len(gotJSONL)+len(raw) > limit {
@@ -67,12 +70,12 @@ func TestRenderTruncatesRawFirst(t *testing.T) {
 }
 
 func TestRenderTruncatesJSONLAtRowBoundary(t *testing.T) {
-	one, _ := Render(sampleRows[:1], 1<<20)
-	jsonl, raw := Render(sampleRows, len(one)+len(TruncatedMarker)+1)
-	if jsonl != one {
-		t.Errorf("jsonl: %q", jsonl)
+	one, _, _ := Render(sampleRows[:1], 1<<20)
+	jsonl, raw, kept := Render(sampleRows, len(one)+200)
+	if jsonl != one || kept != 1 {
+		t.Errorf("kept %d jsonl: %q", kept, jsonl)
 	}
-	if raw != TruncatedMarker+"\n" {
+	if raw != TruncatedMarker+"; sockets.jsonl kept 1 of 2 rows\n" {
 		t.Errorf("raw: %q", raw)
 	}
 }

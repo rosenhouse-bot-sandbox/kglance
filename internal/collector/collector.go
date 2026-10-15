@@ -25,7 +25,7 @@ import (
 const (
 	mirrorAnnotation = "kubernetes.io/config.mirror"
 	// maxDataBytes keeps the ConfigMap under the 1 MiB object limit with room for metadata.
-	maxDataBytes = 1_000_000
+	defaultMaxDataBytes = 1_000_000
 )
 
 // Main runs the collector inside the DaemonSet pod.
@@ -64,6 +64,8 @@ type Collector struct {
 	Node    string
 	Proc    fs.FS
 	Now     func() time.Time
+	// MaxDataBytes defaults to defaultMaxDataBytes.
+	MaxDataBytes int
 }
 
 // Run takes a snapshot immediately and then every interval until ctx is done.
@@ -117,11 +119,19 @@ func (c *Collector) Snapshot(ctx context.Context) error {
 			PID: s.PID, Process: s.Process, Pod: pod, Container: container,
 		})
 	}
-	jsonl, raw := sockets.Render(rows, maxDataBytes)
+	limit := c.MaxDataBytes
+	if limit == 0 {
+		limit = defaultMaxDataBytes
+	}
+	jsonl, raw, kept := sockets.Render(rows, limit)
 
 	cm := corev1ac.ConfigMap("snapshot-"+c.Node, kube.Namespace).
 		WithLabels(map[string]string{kube.SnapshotLabel: "true", kube.ManagedByLabel: kube.ManagedByValue}).
 		WithData(map[string]string{"sockets.jsonl": jsonl, "raw.txt": raw})
+	if kept < len(rows) {
+		slog.Warn("sockets.jsonl truncated to fit the ConfigMap size limit", "kept", kept, "sockets", len(rows))
+		cm.WithAnnotations(map[string]string{kube.TruncatedAnnotation: fmt.Sprintf("kept %d of %d rows", kept, len(rows))})
+	}
 	_, err = c.Client.CoreV1().ConfigMaps(kube.Namespace).Apply(ctx, cm, metav1.ApplyOptions{FieldManager: kube.FieldManager, Force: true})
 	if err != nil {
 		return fmt.Errorf("apply configmap: %w", err)

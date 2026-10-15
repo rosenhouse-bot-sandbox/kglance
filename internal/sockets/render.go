@@ -26,9 +26,9 @@ type Row struct {
 
 const TruncatedMarker = "... truncated to fit the ConfigMap size limit"
 
-// Render returns sockets.jsonl and an ss-style raw.txt whose combined size is at most limit.
-// raw.txt is truncated first; sockets.jsonl is cut at a row boundary only if it alone does not fit.
-func Render(rows []Row, limit int) (jsonl, raw string) {
+// Render returns sockets.jsonl, an ss-style raw.txt whose combined size is at most limit, and the number of rows
+// kept in sockets.jsonl. raw.txt is truncated first; sockets.jsonl is cut at a row boundary only if it alone does not fit.
+func Render(rows []Row, limit int) (jsonl, raw string, kept int) {
 	var j strings.Builder
 	for _, r := range rows {
 		b, _ := json.Marshal(r)
@@ -37,14 +37,19 @@ func Render(rows []Row, limit int) (jsonl, raw string) {
 	}
 	jsonl, raw = j.String(), renderRaw(rows)
 	if len(jsonl)+len(raw) <= limit {
-		return jsonl, raw
+		return jsonl, raw, len(rows)
 	}
 	marker := TruncatedMarker + "\n"
-	room := limit - len(marker)
-	if len(jsonl) > room {
-		return cutAtLine(jsonl, room), marker
+	if len(jsonl) <= limit-len(marker) {
+		return jsonl, cutAtLine(raw, limit-len(marker)-len(jsonl)) + marker, len(rows)
 	}
-	return jsonl, cutAtLine(raw, room-len(jsonl)) + marker
+	jsonl = cutAtLine(jsonl, limit-len(jsonlMarker(len(rows), len(rows))))
+	kept = strings.Count(jsonl, "\n")
+	return jsonl, jsonlMarker(kept, len(rows)), kept
+}
+
+func jsonlMarker(kept, total int) string {
+	return fmt.Sprintf("%s; sockets.jsonl kept %d of %d rows\n", TruncatedMarker, kept, total)
 }
 
 func cutAtLine(s string, n int) string {

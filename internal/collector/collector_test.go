@@ -295,3 +295,24 @@ func TestSnapshotTakesOverFieldsOwnedByOtherManagers(t *testing.T) {
 	}
 	readRows(t, client, "cp1")
 }
+
+func TestSnapshotMarksTruncatedSocketsJSONL(t *testing.T) {
+	client := fake.NewClientset(fixtureObjects()...)
+	c := newCollector(client, "cp1")
+	c.MaxDataBytes = 600
+	if err := c.Snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rows, cm := readRows(t, client, "cp1")
+	if got, want := cm.Annotations[kube.TruncatedAnnotation], fmt.Sprintf("kept %d of 4 rows", len(rows)); got != want || len(rows) >= 4 {
+		t.Errorf("annotation %q want %q", got, want)
+	}
+
+	c.MaxDataBytes = 0
+	if err := c.Snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, cm := readRows(t, client, "cp1"); cm.Annotations[kube.TruncatedAnnotation] != "" {
+		t.Errorf("stale annotation %v", cm.Annotations)
+	}
+}

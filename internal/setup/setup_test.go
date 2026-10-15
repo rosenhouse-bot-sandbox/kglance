@@ -425,6 +425,9 @@ func TestInstructionsGiveSnapshotCommandPerWorkload(t *testing.T) {
 			t.Errorf("missing %s command:\n%s", name, got)
 		}
 	}
+	if !strings.Contains(got, "kglance.io/truncated") {
+		t.Errorf("no truncation note:\n%s", got)
+	}
 	if strings.Contains(got, "--context mgmt") {
 		t.Errorf("mgmt command:\n%s", got)
 	}

@@ -31,6 +31,7 @@ func Instructions(kubeconfig string, expiry time.Time, targets []Target) string 
 		}
 		b.WriteString("\nEach line is one JSON socket row that names its cluster and node, so files from several clusters concatenate.\n")
 		b.WriteString("The raw.txt key holds the same data as an ss-style table.\n")
+		b.WriteString("A ConfigMap annotated kglance.io/truncated holds only some of its node's rows.\n")
 	}
 	b.WriteString("\nAccess is read-only. Secrets, pod logs, exec, port-forward and writes are forbidden.\n")
 	return b.String()
