@@ -417,3 +417,15 @@ func TestRunWaitsForTerminatingNamespace(t *testing.T) {
 		t.Fatalf("%+v %v", ns, err)
 	}
 }
+
+func TestInstructionsGiveSnapshotCommandPerWorkload(t *testing.T) {
+	got := Instructions("/k", now, []Target{mgmt, wl1, wl2})
+	for _, name := range []string{"wl1", "wl2"} {
+		if !strings.Contains(got, "kubectl --context "+name+" -n kglance get configmaps") || !strings.Contains(got, "> "+name+"-sockets.jsonl") {
+			t.Errorf("missing %s command:\n%s", name, got)
+		}
+	}
+	if strings.Contains(got, "--context mgmt") {
+		t.Errorf("mgmt command:\n%s", got)
+	}
+}
