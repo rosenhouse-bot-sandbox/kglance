@@ -59,7 +59,6 @@ func procFS(procs ...proc) fstest.MapFS {
 			m[d+"/net/"+name] = &fstest.MapFile{Data: []byte(data)}
 		}
 	}
-	m["self"] = &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("1")}
 	return m
 }
 
@@ -189,6 +188,13 @@ func (v vanishingFS) ReadLink(name string) (string, error) {
 	return v.m.ReadLink(name)
 }
 
+func (v vanishingFS) Lstat(name string) (fs.FileInfo, error) {
+	if v.gone[name] {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
+	}
+	return v.m.Lstat(name)
+}
+
 func TestScanToleratesVanishingProcesses(t *testing.T) {
 	fsys := vanishingFS{
 		m: procFS(
@@ -224,20 +230,13 @@ func TestScanToleratesVanishingProcesses(t *testing.T) {
 }
 
 func TestScanFailsWithoutHostNetns(t *testing.T) {
-	_, err := Scan(fstest.MapFS{"self": &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("1")}})
+	_, err := Scan(fstest.MapFS{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("got %v", err)
 	}
-}
-
-func (v vanishingFS) Lstat(name string) (fs.FileInfo, error) {
-	if v.gone[name] {
-		return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
-	}
-	return v.m.Lstat(name)
 }
 
 func TestScanAttributesUnreadablePodSocketsToNetnsPod(t *testing.T) {

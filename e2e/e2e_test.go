@@ -12,6 +12,7 @@ package e2e
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -155,7 +156,7 @@ func newEnv(t *testing.T) *env {
 		mgmtCtx:     os.Getenv("KGLANCE_E2E_MGMT_CONTEXT"),
 		wlCtx:       os.Getenv("KGLANCE_E2E_WORKLOAD_CONTEXT"),
 		image:       os.Getenv("KGLANCE_E2E_IMAGE"),
-		listenerImg: cmp(os.Getenv("KGLANCE_E2E_LISTENER_IMAGE"), "busybox:1.37"),
+		listenerImg: cmp.Or(os.Getenv("KGLANCE_E2E_LISTENER_IMAGE"), "busybox:1.37"),
 		dir:         t.TempDir(),
 	}
 	if e.mgmtCtx == "" || e.wlCtx == "" || e.image == "" {
@@ -167,13 +168,6 @@ func newEnv(t *testing.T) *env {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	return e
-}
-
-func cmp(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // startListener runs a non-root pod with a TCP listener in its own netns.
