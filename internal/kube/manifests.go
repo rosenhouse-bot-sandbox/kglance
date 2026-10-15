@@ -18,7 +18,6 @@ const (
 	AgentCAPIRole = "kglance-agent-capi"
 	AgentRole     = "kglance-agent"
 	collectorRole = "kglance-collector"
-	nameLabel     = "app.kubernetes.io/name"
 )
 
 type Object interface {
@@ -169,11 +168,11 @@ func pullPolicy(image string) corev1.PullPolicy {
 
 func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 	tm, om := meta("DaemonSet", "apps/v1", Namespace, CollectorDS)
-	podLabels := map[string]string{nameLabel: CollectorDS, ManagedByLabel: ManagedByValue}
+	podLabels := map[string]string{NameLabel: CollectorDS, ManagedByLabel: ManagedByValue}
 	yes, no, root := true, false, int64(0)
 	grace := int64(5)
 	return &appsv1.DaemonSet{TypeMeta: tm, ObjectMeta: om, Spec: appsv1.DaemonSetSpec{
-		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{nameLabel: CollectorDS}},
+		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{NameLabel: CollectorDS}},
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
 			Spec: corev1.PodSpec{

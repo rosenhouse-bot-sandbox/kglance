@@ -106,12 +106,11 @@ var fixedTime = time.Date(2026, 10, 15, 18, 42, 7, 123, time.FixedZone("x", 3600
 
 func newCollector(client *fake.Clientset, nodeName string) *Collector {
 	return &Collector{
-		Client:    client,
-		Cluster:   "wl1",
-		Node:      nodeName,
-		Namespace: kube.Namespace,
-		Proc:      fixtureProc(),
-		Now:       func() time.Time { return fixedTime },
+		Client:  client,
+		Cluster: "wl1",
+		Node:    nodeName,
+		Proc:    fixtureProc(),
+		Now:     func() time.Time { return fixedTime },
 	}
 }
 

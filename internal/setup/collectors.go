@@ -14,8 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const controlPlaneLabel = "node-role.kubernetes.io/control-plane"
-
 func rolledOut(ds *appsv1.DaemonSet) bool {
 	s := ds.Status
 	return s.ObservedGeneration >= ds.Generation && s.DesiredNumberScheduled > 0 &&
@@ -76,7 +74,7 @@ func waitRollout(ctx context.Context, o Options, c *cluster, deadline time.Time)
 }
 
 func readyNodesByRole(ctx context.Context, c *cluster) (controlPlane, workers int, err error) {
-	pods, err := c.conn.Client.CoreV1().Pods(kube.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "app.kubernetes.io/name=" + kube.CollectorDS})
+	pods, err := c.conn.Client.CoreV1().Pods(kube.Namespace).List(ctx, metav1.ListOptions{LabelSelector: kube.NameLabel + "=" + kube.CollectorDS})
 	if err != nil {
 		return 0, 0, err
 	}
@@ -86,7 +84,7 @@ func readyNodesByRole(ctx context.Context, c *cluster) (controlPlane, workers in
 	}
 	isControlPlane := map[string]bool{}
 	for _, n := range nodes.Items {
-		_, isControlPlane[n.Name] = n.Labels[controlPlaneLabel]
+		_, isControlPlane[n.Name] = n.Labels[kube.ControlPlaneLabel]
 	}
 	for _, p := range pods.Items {
 		if !podReady(&p) {

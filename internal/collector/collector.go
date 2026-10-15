@@ -23,8 +23,7 @@ import (
 )
 
 const (
-	controlPlaneLabel = "node-role.kubernetes.io/control-plane"
-	mirrorAnnotation  = "kubernetes.io/config.mirror"
+	mirrorAnnotation = "kubernetes.io/config.mirror"
 	// maxDataBytes keeps the ConfigMap under the 1 MiB object limit with room for metadata.
 	maxDataBytes = 1_000_000
 )
@@ -33,7 +32,6 @@ const (
 func Main(ctx context.Context, args []string) error {
 	fl := flag.NewFlagSet("collect", flag.ContinueOnError)
 	interval := fl.Duration("interval", time.Minute, "time between snapshots")
-	namespace := fl.String("namespace", kube.Namespace, "namespace for snapshot ConfigMaps")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
@@ -55,18 +53,17 @@ func Main(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	c := &Collector{Client: client, Cluster: cluster, Node: nodeName, Namespace: *namespace, Proc: os.DirFS("/proc"), Now: time.Now}
+	c := &Collector{Client: client, Cluster: cluster, Node: nodeName, Proc: os.DirFS("/proc"), Now: time.Now}
 	c.Run(ctx, *interval)
 	return nil
 }
 
 type Collector struct {
-	Client    kubernetes.Interface
-	Cluster   string
-	Node      string
-	Namespace string
-	Proc      fs.FS
-	Now       func() time.Time
+	Client  kubernetes.Interface
+	Cluster string
+	Node    string
+	Proc    fs.FS
+	Now     func() time.Time
 }
 
 // Run takes a snapshot immediately and then every interval until ctx is done.
@@ -95,7 +92,7 @@ func (c *Collector) Snapshot(ctx context.Context) error {
 		return fmt.Errorf("get node: %w", err)
 	}
 	role := "worker"
-	if _, ok := node.Labels[controlPlaneLabel]; ok {
+	if _, ok := node.Labels[kube.ControlPlaneLabel]; ok {
 		role = "control-plane"
 	}
 	found, err := sockets.Scan(c.Proc)
@@ -122,10 +119,10 @@ func (c *Collector) Snapshot(ctx context.Context) error {
 	}
 	jsonl, raw := sockets.Render(rows, maxDataBytes)
 
-	cm := corev1ac.ConfigMap("snapshot-"+c.Node, c.Namespace).
+	cm := corev1ac.ConfigMap("snapshot-"+c.Node, kube.Namespace).
 		WithLabels(map[string]string{kube.SnapshotLabel: "true", kube.ManagedByLabel: kube.ManagedByValue}).
 		WithData(map[string]string{"sockets.jsonl": jsonl, "raw.txt": raw})
-	_, err = c.Client.CoreV1().ConfigMaps(c.Namespace).Apply(ctx, cm, metav1.ApplyOptions{FieldManager: kube.FieldManager, Force: true})
+	_, err = c.Client.CoreV1().ConfigMaps(kube.Namespace).Apply(ctx, cm, metav1.ApplyOptions{FieldManager: kube.FieldManager, Force: true})
 	if err != nil {
 		return fmt.Errorf("apply configmap: %w", err)
 	}
