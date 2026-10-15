@@ -239,3 +239,20 @@ func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 		t.Errorf("workload %v", got)
 	}
 }
+
+func TestDaemonSetPullsLatestOrUntaggedImagesAlways(t *testing.T) {
+	cases := map[string]corev1.PullPolicy{
+		"ghcr.io/x/kglance:latest":   corev1.PullAlways,
+		"ghcr.io/x/kglance":          corev1.PullAlways,
+		"localhost:5000/kglance":     corev1.PullAlways,
+		"kglance:xt":                 corev1.PullIfNotPresent,
+		"localhost:5000/kglance:v1":  corev1.PullIfNotPresent,
+		"ghcr.io/x/kglance@sha256:0": corev1.PullIfNotPresent,
+	}
+	for img, want := range cases {
+		got := DaemonSet(DaemonSetOptions{Image: img, Interval: time.Minute}).Spec.Template.Spec.Containers[0].ImagePullPolicy
+		if got != want {
+			t.Errorf("%s: got %s want %s", img, got, want)
+		}
+	}
+}

@@ -154,6 +154,19 @@ type DaemonSetOptions struct {
 	Interval time.Duration
 }
 
+// pullPolicy mirrors the Kubernetes default: Always for :latest or untagged images.
+func pullPolicy(image string) corev1.PullPolicy {
+	if strings.Contains(image, "@") {
+		return corev1.PullIfNotPresent
+	}
+	name := image[strings.LastIndexByte(image, '/')+1:]
+	_, tag, ok := strings.Cut(name, ":")
+	if !ok || tag == "latest" {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
+}
+
 func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 	tm, om := meta("DaemonSet", "apps/v1", Namespace, CollectorDS)
 	podLabels := map[string]string{nameLabel: CollectorDS, ManagedByLabel: ManagedByValue}
@@ -174,7 +187,7 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 				Containers: []corev1.Container{{
 					Name:            "collector",
 					Image:           o.Image,
-					ImagePullPolicy: corev1.PullIfNotPresent,
+					ImagePullPolicy: pullPolicy(o.Image),
 					Args:            []string{"collect", "--interval", o.Interval.String()},
 					Env: []corev1.EnvVar{
 						{Name: ClusterEnv, Value: o.Cluster},
