@@ -15,6 +15,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,9 +240,12 @@ func (e *env) snapshotRows(kubeconfig string, nodes map[string]string) (map[stri
 		if role == "control-plane" && !has(rs, map[string]any{"netns": "host", "process": "kube-apiserver", "pod": "kube-system/kube-apiserver-" + node, "container": "kube-apiserver"}) {
 			problems = append(problems, node+": no attributed kube-apiserver listener")
 		}
+		// busybox httpd binds [::] when the pod has IPv6, else 0.0.0.0.
+		listenerRow := map[string]any{"netns": "pod", "state": "LISTEN", "process": "httpd", "pod": listener, "container": "listener"}
 		onNode := node == e.listenerNode()
-		if onNode != has(rs, map[string]any{"netns": "pod", "proto": "tcp", "local": "0.0.0.0:" + listenerPort, "process": "httpd", "pod": listener, "container": "listener"}) {
-			problems = append(problems, fmt.Sprintf("%s: want listener pod row: %v", node, onNode))
+		if onNode != (has(rs, merge(listenerRow, map[string]any{"proto": "tcp", "local": "0.0.0.0:" + listenerPort})) ||
+			has(rs, merge(listenerRow, map[string]any{"proto": "tcp6", "local": "[::]:" + listenerPort}))) {
+			problems = append(problems, fmt.Sprintf("%s: want listener pod row: %v; rows on port %s: %v", node, onNode, listenerPort, onPort(rs, listenerPort)))
 		}
 	}
 	return rows, problems
@@ -268,6 +272,22 @@ func checkKeyOrder(line string) error {
 		return fmt.Errorf("row keys %v, want %v", keys, rowFields)
 	}
 	return nil
+}
+
+func merge(a, b map[string]any) map[string]any {
+	m := maps.Clone(a)
+	maps.Copy(m, b)
+	return m
+}
+
+func onPort(rows []map[string]any, port string) []map[string]any {
+	var on []map[string]any
+	for _, r := range rows {
+		if strings.HasSuffix(r["local"].(string), ":"+port) {
+			on = append(on, r)
+		}
+	}
+	return on
 }
 
 func has(rows []map[string]any, want map[string]any) bool {
