@@ -17,7 +17,7 @@ create() {
 load() {
   local tar
   tar=$(mktemp)
-  docker save "$1" --platform linux/amd64 -o "$tar"
+  docker save --platform linux/amd64 -o "$tar" "$1" 2>/dev/null || docker save -o "$tar" "$1"
   kind load image-archive "$tar" --name "$2"
   rm -f "$tar"
 }
