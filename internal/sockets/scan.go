@@ -3,7 +3,6 @@ package sockets
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net/netip"
@@ -139,17 +138,20 @@ func socketInodes(proc fs.FS, pid int) []uint64 {
 func readNetns(proc fs.FS, pids []int) ([]netEntry, error) {
 	for _, pid := range pids {
 		dir := strconv.Itoa(pid) + "/net/"
-		if _, err := fs.Stat(proc, dir+"tcp"); err != nil {
+		tables := map[string][]byte{}
+		for _, p := range protos {
+			if data, err := fs.ReadFile(proc, dir+p); err == nil {
+				tables[p] = data
+			}
+		}
+		if _, ok := tables["tcp"]; !ok {
 			continue
 		}
 		var all []netEntry
 		for _, p := range protos {
-			data, err := fs.ReadFile(proc, dir+p)
-			if errors.Is(err, fs.ErrNotExist) {
+			data, ok := tables[p]
+			if !ok {
 				continue
-			}
-			if err != nil {
-				return nil, err
 			}
 			entries, err := parseProcNet(p, data)
 			if err != nil {
