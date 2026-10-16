@@ -65,5 +65,10 @@ hack/e2e-kind.sh   # creates Kind clusters kglance-mgmt and kglance-wl
 
 ## Releasing
 
-Push a `vX.Y.Z` tag.
+Push a `vX.Y.Z` tag, or run the `release` workflow on `main`:
+
+```bash
+gh workflow run release.yml -f version=vX.Y.Z
+```
+
 CI runs the tests, pushes the `vX.Y.Z` image and publishes the binaries as a GitHub Release.
