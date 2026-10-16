@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 )
 
@@ -26,12 +27,12 @@ func Instructions(kubeconfig string, expiry time.Time, targets []Target) string 
 	if len(workloads) > 0 {
 		b.WriteString("\nEach workload node publishes its listening TCP/UDP sockets to a ConfigMap. To pull them:\n\n")
 		for _, w := range workloads {
-			fmt.Fprintf(&b, "  kubectl --context %s -n kglance get configmaps -l kglance.io/snapshot \\\n", w)
+			fmt.Fprintf(&b, "  kubectl --context %s -n %s get configmaps -l %s \\\n", w, kube.Namespace, kube.SnapshotLabel)
 			fmt.Fprintf(&b, "    -o go-template='{{range .items}}{{index .data \"sockets.jsonl\"}}{{end}}' > %s-sockets.jsonl\n", w)
 		}
 		b.WriteString("\nEach line is one JSON socket row that names its cluster and node, so files from several clusters concatenate.\n")
 		b.WriteString("The raw.txt key holds the same data as an ss-style table.\n")
-		b.WriteString("A ConfigMap annotated kglance.io/truncated holds only some of its node's rows.\n")
+		fmt.Fprintf(&b, "A ConfigMap annotated %s holds only some of its node's rows.\n", kube.TruncatedAnnotation)
 	}
 	b.WriteString("\nAccess is read-only. Secrets, pod logs, exec, port-forward and writes are forbidden.\n")
 	return b.String()
