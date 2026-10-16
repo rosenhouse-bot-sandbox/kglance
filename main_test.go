@@ -116,18 +116,13 @@ func TestRunPrintsVersion(t *testing.T) {
 			t.Errorf("%v: %d %q", args, code, out.String())
 		}
 	}
-	for _, args := range [][]string{{"--help"}, {}} {
-		var out, errOut bytes.Buffer
-		run(args, &out, &errOut)
-		if got := out.String() + errOut.String(); !strings.HasPrefix(got, want) || !strings.Contains(got, "usage:") {
-			t.Errorf("%v: %q", args, got)
-		}
-	}
 }
 
 func TestHelpDescribesCommands(t *testing.T) {
 	cases := map[string]string{
-		"--help":      "Create read-only service accounts",
+		"--help":      "Creates read-only service accounts",
+		"-h":          "Removes everything setup created",
+		"help":        "Prints the version",
 		"setup -h":    "Re-running setup mints fresh tokens",
 		"teardown -h": "revokes the agent's tokens",
 	}
@@ -136,5 +131,9 @@ func TestHelpDescribesCommands(t *testing.T) {
 		if code := run(strings.Fields(args), &out, &errOut); code != 0 || !strings.Contains(out.String()+errOut.String(), want) {
 			t.Errorf("%s: %d %q", args, code, out.String()+errOut.String())
 		}
+	}
+	var errOut bytes.Buffer
+	if code := run(nil, &bytes.Buffer{}, &errOut); code != 2 || !strings.Contains(errOut.String(), "usage:") {
+		t.Errorf("no args: %d %q", code, errOut.String())
 	}
 }

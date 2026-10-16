@@ -26,17 +26,18 @@ const usage = `kglance hands an AI agent expiring, read-only kubectl access to C
 
 usage:
   kglance setup [--mgmt [name=]context] [--workload [name=]context]... [flags]
-      Create read-only service accounts, start the socket collector and write an agent kubeconfig.
+      Creates read-only service accounts, starts the socket collector and writes an agent kubeconfig.
   kglance teardown [--state file | --context context...]
-      Remove everything setup created and revoke the agent's tokens.
+      Removes everything setup created and revokes the agent's tokens.
   kglance version
+      Prints the version and collector image.
 Run "kglance setup -h" or "kglance teardown -h" for flags.
 `
 
 const setupHelp = `usage: kglance setup [--mgmt [name=]context] [--workload [name=]context]... [flags]
 
 Creates read-only service accounts on each cluster, starts the socket collector on
-workload clusters, writes a kubeconfig for the agent and prints instructions to hand it.
+workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
 
 flags:
@@ -69,7 +70,7 @@ func versionInfo() string {
 
 func run(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(errOut, versionInfo()+usage)
+		fmt.Fprint(errOut, usage)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -97,10 +98,10 @@ func run(args []string, out, errOut io.Writer) int {
 		fmt.Fprint(out, versionInfo())
 		return 0
 	case "-h", "--help", "help":
-		fmt.Fprint(out, versionInfo()+usage)
+		fmt.Fprint(out, usage)
 		return 0
 	default:
-		fmt.Fprint(errOut, versionInfo()+usage)
+		fmt.Fprint(errOut, usage)
 		return 2
 	}
 	switch {
