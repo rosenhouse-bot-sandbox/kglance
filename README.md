@@ -16,16 +16,17 @@ Binaries are also on the [Releases](https://github.com/rosenhouse-bot-sandbox/kg
 
 ## Getting started
 
-With your admin kubeconfig active, run `setup`, naming each cluster's context:
+With your admin context on the management cluster, run `setup`, naming each workload cluster's Cluster API `Cluster`:
 
 ```bash
-$ kglance setup --mgmt mgmt=mgmt-ctx --workload wl1=wl1-ctx -o agent.kubeconfig --instructions agent.md
+$ kglance setup --workload my-namespace/wl1 -o agent.kubeconfig --instructions agent.md
 wrote /home/me/agent.kubeconfig (contexts: mgmt, wl1; expires 19:10 UTC)
 wrote /home/me/kglance.state.json
 socket collector running on 4 nodes (1 control-plane, 3 worker)
 ...
 ```
 
+kglance reaches each workload cluster through the kubeconfig Secret that Cluster API keeps for it, so you don't need a context for it.
 Give the agent `agent.kubeconfig` and `agent.md`.
 The instructions tell it which context does what and how to pull the socket snapshots.
 Tokens last one hour by default; run `setup` again to mint new ones.

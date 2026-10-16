@@ -3,7 +3,7 @@
 // Package e2e runs kglance setup and teardown against real clusters.
 //
 //	KGLANCE_E2E_MGMT_CONTEXT      admin context of a cluster with the CAPI CRDs
-//	KGLANCE_E2E_WORKLOAD_CONTEXT  admin context of a workload cluster
+//	KGLANCE_E2E_WORKLOAD_CONTEXT  admin context of a workload cluster, which the test stores in a Cluster API kubeconfig Secret on mgmt
 //	KGLANCE_E2E_IMAGE             collector image, already present on the workload nodes
 //	KGLANCE_E2E_LISTENER_IMAGE    image with busybox httpd (default busybox:1.37)
 //
@@ -29,6 +29,7 @@ import (
 const (
 	listenerNS   = "kglance-e2e"
 	listenerPort = "18080"
+	workloadRef  = listenerNS + "/wl1"
 )
 
 var rowFields = []string{"cluster", "node", "role", "ts", "netns", "proto", "local", "peer", "state", "pid", "process", "pod", "container"}
@@ -42,16 +43,19 @@ type env struct {
 
 func TestSetupAgentAccessTeardown(t *testing.T) {
 	e := newEnv(t)
-	e.kglance("teardown", "--context", e.mgmtCtx, "--context", e.wlCtx)
+	e.putKubeconfigSecret()
+	e.kglance("teardown", "--context", e.mgmtCtx, "--workload", workloadRef)
 	t.Cleanup(func() {
 		if t.Failed() {
-			e.kglance("teardown", "--context", e.mgmtCtx, "--context", e.wlCtx)
+			e.kglance("teardown", "--context", e.mgmtCtx, "--workload", workloadRef)
 		}
-		e.admin(e.wlCtx, "delete", "namespace", listenerNS, "--ignore-not-found", "--wait=false")
+		for _, ctx := range []string{e.mgmtCtx, e.wlCtx} {
+			e.admin(ctx, "delete", "namespace", listenerNS, "--ignore-not-found", "--wait=false")
+		}
 	})
 	e.startListener()
 
-	out := e.mustKglance("setup", "--mgmt", "mgmt="+e.mgmtCtx, "--workload", "wl1="+e.wlCtx,
+	out := e.mustKglance("setup", "--context", e.mgmtCtx, "--workload", workloadRef,
 		"--ttl", "1h", "-o", "agent.kubeconfig", "--image", e.image, "--interval", "5s")
 	nodes := e.nodes()
 	cp := 0
@@ -109,9 +113,9 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 		}
 	})
 
-	t.Run("setup rerun", func(t *testing.T) {
+	t.Run("setup rerun from the current context", func(t *testing.T) {
 		gen := e.dsGeneration()
-		e.mustKglance("setup", "--mgmt", "mgmt="+e.mgmtCtx, "--workload", "wl1="+e.wlCtx,
+		e.mustKglance("setup", "--kubeconfig", e.adminKubeconfigOnMgmt(), "--workload", workloadRef,
 			"--ttl", "1h", "-o", "agent.kubeconfig", "--image", e.image, "--interval", "5s")
 		if got := e.dsGeneration(); got != gen {
 			t.Errorf("DaemonSet generation %s -> %s", gen, got)
@@ -169,6 +173,29 @@ func newEnv(t *testing.T) *env {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	return e
+}
+
+// putKubeconfigSecret stores the workload's admin kubeconfig on mgmt the way Cluster API does.
+func (e *env) putKubeconfigSecret() {
+	kc := filepath.Join(e.dir, "wl1.kubeconfig")
+	if err := os.WriteFile(kc, []byte(e.mustAdmin(e.wlCtx, "config", "view", "--minify", "--flatten")), 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+	e.admin(e.mgmtCtx, "create", "namespace", listenerNS)
+	e.mustAdmin(e.mgmtCtx, "-n", listenerNS, "delete", "secret", "wl1-kubeconfig", "--ignore-not-found")
+	e.mustAdmin(e.mgmtCtx, "-n", listenerNS, "create", "secret", "generic", "wl1-kubeconfig", "--from-file=value="+kc)
+}
+
+// adminKubeconfigOnMgmt returns a copy of the admin kubeconfig whose current context is mgmt.
+func (e *env) adminKubeconfigOnMgmt() string {
+	kc := filepath.Join(e.dir, "admin.kubeconfig")
+	if err := os.WriteFile(kc, []byte(e.mustAdmin(e.mgmtCtx, "config", "view", "--flatten")), 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+	if out, err := run([]string{"--kubeconfig", kc, "config", "use-context", e.mgmtCtx}); err != nil {
+		e.t.Fatalf("%v %s", err, out)
+	}
+	return kc
 }
 
 // startListener runs a non-root pod with a TCP listener in its own netns.

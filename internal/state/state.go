@@ -28,9 +28,12 @@ type File struct {
 }
 
 type Cluster struct {
-	Name          string   `json:"name"`
-	Role          string   `json:"role"`
-	Context       string   `json:"context"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+	// Context is the admin context. With ClusterRef, it is the management context that holds the Cluster's kubeconfig Secret.
+	Context string `json:"context"`
+	// ClusterRef is a Cluster API Cluster's "namespace/name".
+	ClusterRef    string   `json:"clusterRef,omitempty"`
 	Server        string   `json:"server"`
 	CAFingerprint string   `json:"caFingerprint"`
 	Objects       []Object `json:"objects"`

@@ -47,13 +47,15 @@ type fakeCluster struct {
 
 type harness struct {
 	dir      string
+	mgmt     *fake.Clientset
 	clusters map[string]*fakeCluster
 	st       *state.File
 	out, err bytes.Buffer
 }
 
+// newHarness installs kglance on a workload cluster per name, each recorded by its Cluster API reference ns1/<name>.
 func newHarness(t *testing.T, names ...string) *harness {
-	h := &harness{dir: t.TempDir(), clusters: map[string]*fakeCluster{}}
+	h := &harness{dir: t.TempDir(), mgmt: fake.NewClientset(), clusters: map[string]*fakeCluster{}}
 	h.st = &state.File{Version: state.Version, Kubeconfig: filepath.Join(h.dir, "agent.kubeconfig")}
 	os.WriteFile(h.st.Kubeconfig, agentKubeconfig(names...), 0o600)
 	for _, name := range names {
@@ -64,8 +66,8 @@ func newHarness(t *testing.T, names ...string) *harness {
 			),
 			server: "https://" + name + ":6443", ca: caPEM(t),
 		}
-		h.clusters[name+"-ctx"] = fc
-		rec := state.Cluster{Name: name, Role: state.RoleWorkload, Context: name + "-ctx", Server: fc.server}
+		h.clusters[name] = fc
+		rec := state.Cluster{Name: name, Role: state.RoleWorkload, Context: "mgmt-ctx", ClusterRef: "ns1/" + name, Server: fc.server}
 		rec.CAFingerprint, _ = state.Fingerprint(fc.ca)
 		for _, o := range kube.WorkloadObjects(nil, kube.DaemonSetOptions{Image: "i", Interval: time.Minute}) {
 			if err := kube.Apply(context.Background(), fc.cs, o); err != nil {
@@ -77,6 +79,22 @@ func newHarness(t *testing.T, names ...string) *harness {
 		h.st.Clusters = append(h.st.Clusters, rec)
 	}
 	return h
+}
+
+// writeKubeconfigSecrets stores each workload's current server and CA in its Cluster API kubeconfig Secret on mgmt.
+func (h *harness) writeKubeconfigSecrets(t *testing.T) {
+	for name, fc := range h.clusters {
+		cfg := clientcmdapi.NewConfig()
+		cfg.Clusters[name] = &clientcmdapi.Cluster{Server: fc.server, CertificateAuthorityData: fc.ca}
+		cfg.AuthInfos["admin"] = &clientcmdapi.AuthInfo{Token: "admin"}
+		cfg.Contexts["admin"] = &clientcmdapi.Context{Cluster: name, AuthInfo: "admin"}
+		cfg.CurrentContext = "admin"
+		data, err := clientcmd.Write(*cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.mgmt.Tracker().Add(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: name + "-kubeconfig"}, Data: map[string][]byte{"value": data}})
+	}
 }
 
 func agentKubeconfig(names ...string) []byte {
@@ -98,16 +116,31 @@ func (h *harness) options(t *testing.T) Options {
 	if err := state.Save(path, h.st); err != nil {
 		t.Fatal(err)
 	}
+	h.writeKubeconfigSecrets(t)
+	conn := func(name string, fc *fakeCluster) *kube.Conn {
+		return &kube.Conn{Context: name, Client: fc.cs, Cluster: &clientcmdapi.Cluster{Server: fc.server, CertificateAuthorityData: fc.ca}}
+	}
 	return Options{
 		StatePath: path,
 		Out:       &h.out,
 		Err:       &h.err,
 		Connect: func(ctxName string) (*kube.Conn, error) {
-			c, ok := h.clusters[ctxName]
-			if !ok {
-				return nil, fmt.Errorf("context %q not found", ctxName)
+			if ctxName == "" || ctxName == "mgmt-ctx" {
+				return &kube.Conn{Context: "mgmt-ctx", Client: h.mgmt, Cluster: &clientcmdapi.Cluster{Server: "https://mgmt:6443"}}, nil
 			}
-			return &kube.Conn{Context: ctxName, Client: c.cs, Cluster: &clientcmdapi.Cluster{Server: c.server, CertificateAuthorityData: c.ca}}, nil
+			if c, ok := h.clusters[strings.TrimSuffix(ctxName, "-ctx")]; ok {
+				return conn(ctxName, c), nil
+			}
+			return nil, fmt.Errorf("context %q not found", ctxName)
+		},
+		ConnectKubeconfig: func(data []byte) (*kube.Conn, error) {
+			cfg, err := clientcmd.Load(data)
+			if err != nil {
+				return nil, err
+			}
+			name := cfg.Contexts[cfg.CurrentContext].Cluster
+			c := cfg.Clusters[name]
+			return &kube.Conn{Client: h.clusters[name].cs, Cluster: c}, nil
 		},
 	}
 }
@@ -182,19 +215,19 @@ func TestRunRefusesClusterWhoseServerOrCAChanged(t *testing.T) {
 		t.Run(tamper, func(t *testing.T) {
 			h := newHarness(t, "wl1", "wl2")
 			if tamper == "server" {
-				h.clusters["wl1-ctx"].server = "https://elsewhere:6443"
+				h.clusters["wl1"].server = "https://elsewhere:6443"
 			} else {
-				h.clusters["wl1-ctx"].ca = caPEM(t)
+				h.clusters["wl1"].ca = caPEM(t)
 			}
 			o := h.options(t)
 			err := Run(context.Background(), o)
 			if err == nil {
 				t.Fatal("expected error")
 			}
-			if !installed(t, h.clusters["wl1-ctx"].cs) {
+			if !installed(t, h.clusters["wl1"].cs) {
 				t.Error("deleted from tampered cluster")
 			}
-			if installed(t, h.clusters["wl2-ctx"].cs) {
+			if installed(t, h.clusters["wl2"].cs) {
 				t.Error("healthy cluster not cleaned")
 			}
 			if !strings.Contains(h.err.String(), "wl1") || !strings.Contains(h.err.String(), "does not match") {
@@ -226,23 +259,72 @@ func TestRunWithoutStateFileFails(t *testing.T) {
 	}
 }
 
-func TestRunByContextDeletesLabelledObjectsOnly(t *testing.T) {
+func TestRunByLabelDeletesLabelledObjectsOnly(t *testing.T) {
 	h := newHarness(t, "wl1", "wl2")
+	for _, o := range kube.MgmtObjects() {
+		if err := kube.Apply(context.Background(), h.mgmt, o); err != nil {
+			t.Fatal(err)
+		}
+	}
 	o := h.options(t)
 	os.Remove(o.StatePath)
-	o.Contexts = []string{"wl1-ctx"}
+	o.ByLabel, o.Workloads = true, []string{"ns1/wl1"}
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	if installed(t, h.clusters["wl1-ctx"].cs) {
+	if installed(t, h.clusters["wl1"].cs) {
 		t.Error("wl1 still installed")
 	}
-	unrelatedIntact(t, h.clusters["wl1-ctx"].cs)
-	if !installed(t, h.clusters["wl2-ctx"].cs) {
+	unrelatedIntact(t, h.clusters["wl1"].cs)
+	if !installed(t, h.clusters["wl2"].cs) {
 		t.Error("wl2 touched")
 	}
-	if !strings.Contains(h.out.String(), "removing kglance from context wl1-ctx ... done") {
-		t.Errorf("out %q", h.out.String())
+	if _, err := h.mgmt.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("mgmt namespace: %v", err)
+	}
+	if want := "removing kglance from context mgmt-ctx ... done\nremoving kglance from Cluster ns1/wl1 ... done\n"; h.out.String() != want {
+		t.Errorf("out %q want %q", h.out.String(), want)
+	}
+}
+
+func TestRunByLabelReportsUnreachableCluster(t *testing.T) {
+	h := newHarness(t, "wl1")
+	o := h.options(t)
+	o.ByLabel, o.Workloads = true, []string{"ns1/gone", "ns1/wl1"}
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "Cluster ns1/gone") || !strings.Contains(h.err.String(), "ns1/gone-kubeconfig") {
+		t.Fatalf("err %v stderr %q", err, h.err.String())
+	}
+	if installed(t, h.clusters["wl1"].cs) {
+		t.Error("wl1 not cleaned after an earlier failure")
+	}
+}
+
+func TestRunRemovesClustersRecordedByWorkloadContext(t *testing.T) {
+	h := newHarness(t, "wl1")
+	h.st.Clusters[0].Context, h.st.Clusters[0].ClusterRef = "wl1-ctx", ""
+	o := h.options(t)
+	h.mgmt = nil
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, h.err.String())
+	}
+	if installed(t, h.clusters["wl1"].cs) {
+		t.Error("still installed")
+	}
+}
+
+func TestRunKeepsClusterWhoseKubeconfigSecretIsGone(t *testing.T) {
+	h := newHarness(t, "wl1")
+	o := h.options(t)
+	h.mgmt.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("secrets"), "ns1", "wl1-kubeconfig")
+	if err := Run(context.Background(), o); err == nil {
+		t.Fatal("expected error")
+	}
+	if !installed(t, h.clusters["wl1"].cs) || !strings.Contains(h.err.String(), "ns1/wl1-kubeconfig") {
+		t.Errorf("stderr %q", h.err.String())
+	}
+	if st, err := state.Load(o.StatePath); err != nil || len(st.Clusters) != 1 {
+		t.Errorf("state %+v %v", st, err)
 	}
 }
 
@@ -254,7 +336,7 @@ func TestRunSkipsRecordedObjectsNotManagedByKglance(t *testing.T) {
 	if err := Run(context.Background(), h.options(t)); err != nil {
 		t.Fatalf("%v\n%s", err, h.err.String())
 	}
-	cs := h.clusters["wl1-ctx"].cs
+	cs := h.clusters["wl1"].cs
 	unrelatedIntact(t, cs)
 	if installed(t, cs) {
 		t.Error("still installed")

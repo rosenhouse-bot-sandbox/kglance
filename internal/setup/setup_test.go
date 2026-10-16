@@ -117,22 +117,52 @@ func collectorPod(name, node string, ready bool) *corev1.Pod {
 }
 
 type harness struct {
+	t        *testing.T
 	dir      string
 	clusters map[string]*fakeCluster
 	out, err bytes.Buffer
 }
 
 func newHarness(t *testing.T) *harness {
-	h := &harness{dir: t.TempDir(), clusters: map[string]*fakeCluster{}}
-	h.clusters["mgmt-ctx"] = newFakeCluster(t, "https://mgmt:6443", 0)
-	h.clusters["wl1-ctx"] = newFakeCluster(t, "https://wl1:6443", 0)
-	h.clusters["wl2-ctx"] = newFakeCluster(t, "https://wl2:6443", 0)
+	h := &harness{t: t, dir: t.TempDir(), clusters: map[string]*fakeCluster{}}
+	h.clusters["mgmt"] = newFakeCluster(t, "https://mgmt:6443", 0)
+	h.addWorkload("wl1", 0)
+	h.addWorkload("wl2", 0)
 	return h
 }
 
-func (h *harness) options(targets ...Target) Options {
+// addWorkload creates a workload cluster and its Cluster API kubeconfig Secret ns1/<name>-kubeconfig on mgmt.
+func (h *harness) addWorkload(name string, tokenCap time.Duration) *fakeCluster {
+	fc := newFakeCluster(h.t, "https://"+name+":6443", tokenCap)
+	h.clusters[name] = fc
+	h.putKubeconfigSecret(name, fc)
+	return fc
+}
+
+func (h *harness) putKubeconfigSecret(name string, fc *fakeCluster) {
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters["c"] = fc.conn.Cluster.DeepCopy()
+	cfg.AuthInfos["admin"] = &clientcmdapi.AuthInfo{ClientCertificateData: []byte("cert"), ClientKeyData: []byte("key")}
+	cfg.Contexts["admin@c"] = &clientcmdapi.Context{Cluster: "c", AuthInfo: "admin"}
+	cfg.CurrentContext = "admin@c"
+	data, err := clientcmd.Write(*cfg)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: name + "-kubeconfig"}, Data: map[string][]byte{"value": data}}
+	secrets := h.clusters["mgmt"].cs.CoreV1().Secrets("ns1")
+	_, err = secrets.Update(context.Background(), secret, metav1.UpdateOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = secrets.Create(context.Background(), secret, metav1.CreateOptions{})
+	}
+	if err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) options(workloads ...Workload) Options {
 	return Options{
-		Targets:          targets,
+		Workloads:        workloads,
 		TTL:              time.Hour,
 		KubeconfigPath:   filepath.Join(h.dir, "agent.kubeconfig"),
 		StatePath:        filepath.Join(h.dir, "kglance.state.json"),
@@ -145,33 +175,47 @@ func (h *harness) options(targets ...Target) Options {
 		Out:              &h.out,
 		Err:              &h.err,
 		Connect: func(ctxName string) (*kube.Conn, error) {
-			c, ok := h.clusters[ctxName]
-			if !ok {
+			if ctxName == "" {
+				ctxName = "mgmt-ctx"
+			}
+			if ctxName != "mgmt-ctx" {
 				return nil, fmt.Errorf("context %q not found", ctxName)
 			}
-			conn := *c.conn
+			conn := *h.clusters["mgmt"].conn
 			conn.Context = ctxName
 			return &conn, nil
+		},
+		ConnectKubeconfig: func(data []byte) (*kube.Conn, error) {
+			cfg, err := clientcmd.Load(data)
+			if err != nil {
+				return nil, err
+			}
+			cluster := cfg.Clusters[cfg.Contexts[cfg.CurrentContext].Cluster]
+			for _, fc := range h.clusters {
+				if fc.conn.Cluster.Server == cluster.Server {
+					return &kube.Conn{Client: fc.cs, Cluster: cluster}, nil
+				}
+			}
+			return nil, fmt.Errorf("no cluster at %s", cluster.Server)
 		},
 	}
 }
 
 var (
-	mgmt = Target{Name: "mgmt", Role: state.RoleMgmt, Context: "mgmt-ctx"}
-	wl1  = Target{Name: "wl1", Role: state.RoleWorkload, Context: "wl1-ctx"}
-	wl2  = Target{Name: "wl2", Role: state.RoleWorkload, Context: "wl2-ctx"}
+	wl1 = Workload{Name: "wl1", Cluster: "ns1/wl1"}
+	wl2 = Workload{Name: "wl2", Cluster: "ns1/wl2"}
 )
 
 func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	h := newHarness(t)
-	o := h.options(mgmt, wl1)
+	o := h.options(wl1)
 	o.InstructionsPath = filepath.Join(h.dir, "instructions.txt")
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatalf("%v\n%s", err, h.err.String())
 	}
 	ctx := context.Background()
 
-	m, w := h.clusters["mgmt-ctx"].cs, h.clusters["wl1-ctx"].cs
+	m, w := h.clusters["mgmt"].cs, h.clusters["wl1"].cs
 	if _, err := m.RbacV1().ClusterRoles().Get(ctx, kube.AgentCAPIRole, metav1.GetOptions{}); err != nil {
 		t.Error("mgmt: capi role missing")
 	}
@@ -193,7 +237,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	if len(view.Rules) == 0 || strings.Contains(fmt.Sprint(view.Rules), "pods/log") || !strings.Contains(fmt.Sprint(view.Rules), "configmaps") {
 		t.Errorf("view rules %+v", view.Rules)
 	}
-	if got := h.clusters["wl1-ctx"].tokenTTLs; len(got) != 1 || got[0] != 3600 {
+	if got := h.clusters["wl1"].tokenTTLs; len(got) != 1 || got[0] != 3600 {
 		t.Errorf("token ttls %v", got)
 	}
 
@@ -225,15 +269,15 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 		t.Fatalf("state %+v", st)
 	}
 	sw := st.Find("wl1")
-	fp, _ := state.Fingerprint(h.clusters["wl1-ctx"].conn.Cluster.CertificateAuthorityData)
-	if sw.Role != state.RoleWorkload || sw.Context != "wl1-ctx" || sw.Server != "https://wl1:6443" || sw.CAFingerprint != fp || fp == "" {
+	fp, _ := state.Fingerprint(h.clusters["wl1"].conn.Cluster.CertificateAuthorityData)
+	if sw.Role != state.RoleWorkload || sw.Context != "mgmt-ctx" || sw.ClusterRef != "ns1/wl1" || sw.Server != "https://wl1:6443" || sw.CAFingerprint != fp || fp == "" {
 		t.Errorf("wl1 record %+v", sw)
 	}
 	if len(sw.Objects) != 12 || sw.Objects[11] != (state.Object{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "kglance", Name: "kglance-collector"}) {
 		t.Errorf("objects %+v", sw.Objects)
 	}
-	if len(st.Find("mgmt").Objects) != 4 {
-		t.Errorf("mgmt objects %+v", st.Find("mgmt").Objects)
+	if sm := st.Find("mgmt"); len(sm.Objects) != 4 || sm.Context != "mgmt-ctx" || sm.ClusterRef != "" {
+		t.Errorf("mgmt record %+v", sm)
 	}
 
 	out := h.out.String()
@@ -257,7 +301,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 
 func TestRunWarnsWhenServerShortensToken(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"] = newFakeCluster(t, "https://wl1:6443", 30*time.Minute)
+	h.addWorkload("wl1", 30*time.Minute)
 	o := h.options(wl1)
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
@@ -279,13 +323,13 @@ func TestRerunKeepsRecordedClustersNotGivenAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, _ := state.Load(h.options().StatePath)
-	if len(st.Clusters) != 2 || st.Find("wl2") == nil {
+	if len(st.Clusters) != 3 || st.Find("wl2") == nil {
 		t.Fatalf("clusters %+v", st.Clusters)
 	}
 	if n := len(st.Find("wl1").Objects); n != 12 {
 		t.Errorf("wl1 records %d objects", n)
 	}
-	if n := len(h.clusters["wl1-ctx"].tokenTTLs); n != 2 {
+	if n := len(h.clusters["wl1"].tokenTTLs); n != 2 {
 		t.Errorf("wl1 minted %d tokens", n)
 	}
 }
@@ -293,31 +337,30 @@ func TestRerunKeepsRecordedClustersNotGivenAgain(t *testing.T) {
 func TestRunRefusesClusterRecordedWithDifferentServer(t *testing.T) {
 	h := newHarness(t)
 	o := h.options(wl1)
-	state.Save(o.StatePath, &state.File{Version: state.Version, Clusters: []state.Cluster{{Name: "wl1", Role: state.RoleWorkload, Context: "wl1-ctx", Server: "https://elsewhere:6443"}}})
+	state.Save(o.StatePath, &state.File{Version: state.Version, Clusters: []state.Cluster{{Name: "wl1", Role: state.RoleWorkload, Context: "mgmt-ctx", ClusterRef: "ns1/wl1", Server: "https://elsewhere:6443"}}})
 	err := Run(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "wl1") {
 		t.Fatalf("err %v", err)
 	}
-	if _, gerr := h.clusters["wl1-ctx"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); !apierrors.IsNotFound(gerr) {
+	if _, gerr := h.clusters["wl1"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); !apierrors.IsNotFound(gerr) {
 		t.Error("objects applied despite mismatch")
 	}
 }
 
 func TestRunRefusesRoleChange(t *testing.T) {
 	h := newHarness(t)
-	if err := Run(context.Background(), h.options(wl1)); err != nil {
-		t.Fatal(err)
-	}
-	asMgmt := Target{Name: "wl1", Role: state.RoleMgmt, Context: "wl1-ctx"}
-	if err := Run(context.Background(), h.options(asMgmt)); err == nil {
-		t.Fatal("expected error")
+	o := h.options()
+	fp, _ := state.Fingerprint(h.clusters["mgmt"].conn.Cluster.CertificateAuthorityData)
+	state.Save(o.StatePath, &state.File{Version: state.Version, Clusters: []state.Cluster{{Name: "mgmt", Role: state.RoleWorkload, Context: "mgmt-ctx", Server: "https://mgmt:6443", CAFingerprint: fp}}})
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "recorded as workload") {
+		t.Fatalf("err %v", err)
 	}
 }
 
-func TestRunRefusesTwoTargetsOnSameCluster(t *testing.T) {
+func TestRunRefusesTwoWorkloadsOnSameCluster(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["alias-ctx"] = h.clusters["wl1-ctx"]
-	err := Run(context.Background(), h.options(wl1, Target{Name: "alias", Role: state.RoleWorkload, Context: "alias-ctx"}))
+	h.putKubeconfigSecret("alias", h.clusters["wl1"])
+	err := Run(context.Background(), h.options(wl1, Workload{Name: "alias", Cluster: "ns1/alias"}))
 	if err == nil || !strings.Contains(err.Error(), "same cluster") {
 		t.Fatalf("err %v", err)
 	}
@@ -325,7 +368,7 @@ func TestRunRefusesTwoTargetsOnSameCluster(t *testing.T) {
 
 func TestRunReportsCollectorNotReady(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"].ready = false
+	h.clusters["wl1"].ready = false
 	o := h.options(wl1)
 	o.Wait = 20 * time.Millisecond
 	err := Run(context.Background(), o)
@@ -342,7 +385,7 @@ func TestRunReportsCollectorNotReady(t *testing.T) {
 
 func TestRunReportsCollectorNotReadyWhileStatusIsStale(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"].stale = true
+	h.clusters["wl1"].stale = true
 	o := h.options(wl1)
 	o.Wait = 20 * time.Millisecond
 	if err := Run(context.Background(), o); err == nil {
@@ -355,7 +398,7 @@ func TestRunReportsCollectorNotReadyWhileStatusIsStale(t *testing.T) {
 
 func TestRunReportsCollectorNotReadyWhileOldPodsRemain(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"].status = func(s *appsv1.DaemonSetStatus) { s.UpdatedNumberScheduled = 1 }
+	h.clusters["wl1"].status = func(s *appsv1.DaemonSetStatus) { s.UpdatedNumberScheduled = 1 }
 	o := h.options(wl1)
 	o.Wait = 20 * time.Millisecond
 	if err := Run(context.Background(), o); err == nil {
@@ -368,7 +411,7 @@ func TestRunReportsCollectorNotReadyWhileOldPodsRemain(t *testing.T) {
 
 func TestRunReportsCollectorNotReadyWhenScheduledOnNoNodes(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"].status = func(s *appsv1.DaemonSetStatus) { *s = appsv1.DaemonSetStatus{} }
+	h.clusters["wl1"].status = func(s *appsv1.DaemonSetStatus) { *s = appsv1.DaemonSetStatus{} }
 	o := h.options(wl1)
 	o.Wait = 20 * time.Millisecond
 	if err := Run(context.Background(), o); err == nil {
@@ -381,40 +424,42 @@ func TestRunReportsCollectorNotReadyWhenScheduledOnNoNodes(t *testing.T) {
 
 func TestRunFailsWithoutViewClusterRole(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"].cs.RbacV1().ClusterRoles().Delete(context.Background(), "view", metav1.DeleteOptions{})
+	h.clusters["wl1"].cs.RbacV1().ClusterRoles().Delete(context.Background(), "view", metav1.DeleteOptions{})
 	if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "view") {
 		t.Fatalf("err %v", err)
 	}
 }
 
-func TestParseTarget(t *testing.T) {
+func TestParseWorkload(t *testing.T) {
 	cases := []struct {
-		in, name, ctx string
-		ok            bool
+		in, name, cluster string
+		ok                bool
 	}{
-		{"wl1=kind-t1", "wl1", "kind-t1", true},
-		{"kind-t1", "kind-t1", "kind-t1", true},
+		{"wl1=ns1/c1", "wl1", "ns1/c1", true},
+		{"ns1/c1", "c1", "ns1/c1", true},
+		{"c1", "", "", false},
 		{"", "", "", false},
-		{"=ctx", "", "", false},
-		{"name=", "", "", false},
+		{"=ns1/c1", "", "", false},
+		{"wl1=", "", "", false},
+		{"wl1=c1", "", "", false},
+		{"ns1/c1/x", "", "", false},
 	}
 	for _, c := range cases {
-		got, err := ParseTarget(state.RoleWorkload, c.in)
-		if (err == nil) != c.ok || (c.ok && (got.Name != c.name || got.Context != c.ctx || got.Role != state.RoleWorkload)) {
+		got, err := ParseWorkload(c.in)
+		if (err == nil) != c.ok || (c.ok && got != (Workload{Name: c.name, Cluster: c.cluster})) {
 			t.Errorf("%q: got %+v %v", c.in, got, err)
 		}
 	}
 }
 
 func TestValidate(t *testing.T) {
-	good := Options{Targets: []Target{mgmt, wl1}, TTL: time.Hour, Interval: time.Minute, Image: "i"}
+	good := Options{Workloads: []Workload{wl1}, TTL: time.Hour, Interval: time.Minute, Image: "i"}
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	bad := map[string]func(o *Options){
-		"no targets":    func(o *Options) { o.Targets = nil },
-		"two mgmt":      func(o *Options) { o.Targets = []Target{mgmt, {Name: "m2", Role: state.RoleMgmt, Context: "x"}} },
-		"dup name":      func(o *Options) { o.Targets = []Target{wl1, {Name: "wl1", Role: state.RoleWorkload, Context: "x"}} },
+		"dup name":      func(o *Options) { o.Workloads = []Workload{wl1, {Name: "wl1", Cluster: "ns2/wl1"}} },
+		"named mgmt":    func(o *Options) { o.Workloads = []Workload{{Name: "mgmt", Cluster: "ns1/mgmt"}} },
 		"ttl too short": func(o *Options) { o.TTL = 9 * time.Minute },
 		"ttl too long":  func(o *Options) { o.TTL = 8*time.Hour + time.Second },
 		"interval":      func(o *Options) { o.Interval = 0 },
@@ -426,6 +471,11 @@ func TestValidate(t *testing.T) {
 		if err := o.Validate(); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
+	}
+	mgmtOnly := good
+	mgmtOnly.Workloads = nil
+	if err := mgmtOnly.Validate(); err != nil {
+		t.Error(err)
 	}
 	edge := good
 	edge.TTL = 8 * time.Hour
@@ -439,7 +489,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestInstructionsForMgmtOnlyOmitSnapshotCommand(t *testing.T) {
-	got := Instructions("/k", now, []Target{mgmt})
+	got := Instructions("/k", now, nil)
 	if strings.Contains(got, "configmaps") || !strings.Contains(got, "mgmt ") || !strings.Contains(got, "2026-10-15 18:10 UTC") {
 		t.Errorf("%s", got)
 	}
@@ -447,7 +497,7 @@ func TestInstructionsForMgmtOnlyOmitSnapshotCommand(t *testing.T) {
 
 func TestRunWaitsForTerminatingNamespace(t *testing.T) {
 	h := newHarness(t)
-	fc := h.clusters["wl1-ctx"]
+	fc := h.clusters["wl1"]
 	deleting := metav1.NewTime(now)
 	fc.cs.Tracker().Add(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace, DeletionTimestamp: &deleting, Finalizers: []string{"kubernetes"}}})
 	gets := 0
@@ -470,7 +520,7 @@ func TestRunWaitsForTerminatingNamespace(t *testing.T) {
 }
 
 func TestInstructionsGiveSnapshotCommandPerWorkload(t *testing.T) {
-	got := Instructions("/k", now, []Target{mgmt, wl1, wl2})
+	got := Instructions("/k", now, []Workload{wl1, wl2})
 	for _, name := range []string{"wl1", "wl2"} {
 		if !strings.Contains(got, "kubectl --context "+name+" -n kglance get configmaps") || !strings.Contains(got, "> "+name+"-sockets.jsonl") {
 			t.Errorf("missing %s command:\n%s", name, got)
@@ -492,7 +542,7 @@ func failDaemonSetApply(fc *fakeCluster) {
 
 func TestRunRecordsObjectsAppliedBeforeAFailure(t *testing.T) {
 	h := newHarness(t)
-	failDaemonSetApply(h.clusters["wl1-ctx"])
+	failDaemonSetApply(h.clusters["wl1"])
 	o := h.options(wl1)
 	err := Run(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "hostPID") || !strings.Contains(err.Error(), "kglance teardown") {
@@ -514,7 +564,7 @@ func TestRerunFailureKeepsPreviouslyRecordedObjects(t *testing.T) {
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	failDaemonSetApply(h.clusters["wl1-ctx"])
+	failDaemonSetApply(h.clusters["wl1"])
 	if err := Run(context.Background(), o); err == nil {
 		t.Fatal("expected error")
 	}
@@ -533,7 +583,7 @@ func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 	for name, existing := range cases {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			fc := h.clusters["wl1-ctx"]
+			fc := h.clusters["wl1"]
 			fc.cs.Tracker().Add(existing.(runtime.Object))
 			err := Run(context.Background(), h.options(wl1))
 			if err == nil || !strings.Contains(err.Error(), name+" exists and is not managed by kglance") {
@@ -557,7 +607,7 @@ func TestRunRefusesRenamingARecordedCluster(t *testing.T) {
 	if err := Run(context.Background(), h.options(wl1)); err != nil {
 		t.Fatal(err)
 	}
-	renamed := Target{Name: "renamed", Role: state.RoleWorkload, Context: "wl1-ctx"}
+	renamed := Workload{Name: "renamed", Cluster: "ns1/wl1"}
 	if err := Run(context.Background(), h.options(renamed)); err == nil || !strings.Contains(err.Error(), "already recorded as wl1") {
 		t.Fatalf("err %v", err)
 	}
@@ -565,7 +615,7 @@ func TestRunRefusesRenamingARecordedCluster(t *testing.T) {
 
 func TestRunCountsOnlyReadyCollectorPods(t *testing.T) {
 	h := newHarness(t)
-	fc := h.clusters["wl1-ctx"]
+	fc := h.clusters["wl1"]
 	fc.cs.Tracker().Add(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "w2"}})
 	fc.cs.Tracker().Add(collectorPod("p3", "w2", false))
 	if err := Run(context.Background(), h.options(wl1)); err != nil {
@@ -578,7 +628,7 @@ func TestRunCountsOnlyReadyCollectorPods(t *testing.T) {
 
 func TestRunUsesEarliestTokenExpiry(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"] = newFakeCluster(t, "https://wl1:6443", 30*time.Minute)
+	h.addWorkload("wl1", 30*time.Minute)
 	o := h.options(wl1, wl2)
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
@@ -591,7 +641,7 @@ func TestRunUsesEarliestTokenExpiry(t *testing.T) {
 
 func TestAgentKubeconfigOmitsAdminKubeconfigExtensions(t *testing.T) {
 	h := newHarness(t)
-	h.clusters["wl1-ctx"].conn.Cluster.Extensions = map[string]runtime.Object{"admin-ext": &runtime.Unknown{Raw: []byte(`{"secret":"x"}`)}}
+	h.clusters["mgmt"].conn.Cluster.Extensions = map[string]runtime.Object{"admin-ext": &runtime.Unknown{Raw: []byte(`{"secret":"x"}`)}}
 	o := h.options(wl1)
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
@@ -631,9 +681,36 @@ func TestRunRefusesToOverwriteAdminKubeconfig(t *testing.T) {
 			if b, _ := os.ReadFile(admin); string(b) != "admin" {
 				t.Errorf("admin kubeconfig changed: %q", b)
 			}
-			if _, err := h.clusters["wl1-ctx"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); err == nil {
+			if _, err := h.clusters["wl1"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); err == nil {
 				t.Error("applied objects before refusing")
 			}
 		})
+	}
+}
+
+func TestRunConnectsToGivenMgmtContext(t *testing.T) {
+	h := newHarness(t)
+	o := h.options(wl1)
+	o.MgmtContext = "other-ctx"
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), `"other-ctx"`) {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestRunFailsWithoutKubeconfigSecret(t *testing.T) {
+	h := newHarness(t)
+	err := Run(context.Background(), h.options(wl1, Workload{Name: "missing", Cluster: "ns1/missing"}))
+	if err == nil || !strings.Contains(err.Error(), "missing: read kubeconfig Secret ns1/missing-kubeconfig") {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := h.clusters["mgmt"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Error("applied objects before connecting to every cluster")
+	}
+}
+
+func TestInstructionsNameEachWorkloadsCluster(t *testing.T) {
+	got := Instructions("/k", now, []Workload{wl1})
+	if !strings.Contains(got, "wl1          workload cluster ns1/wl1:") {
+		t.Errorf("%s", got)
 	}
 }
