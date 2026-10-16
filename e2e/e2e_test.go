@@ -164,7 +164,7 @@ func newEnv(t *testing.T) *env {
 		t.Skip("set KGLANCE_E2E_MGMT_CONTEXT, KGLANCE_E2E_WORKLOAD_CONTEXT and KGLANCE_E2E_IMAGE")
 	}
 	e.bin = filepath.Join(t.TempDir(), "kglance")
-	build := exec.Command("go", "build", "-o", e.bin, "../cmd/kglance")
+	build := exec.Command("go", "build", "-o", e.bin, "..")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
