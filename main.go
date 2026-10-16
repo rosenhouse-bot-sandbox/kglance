@@ -22,11 +22,31 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const usage = `usage:
+const usage = `kglance hands an AI agent expiring, read-only kubectl access to Cluster API clusters.
+
+usage:
   kglance setup [--mgmt [name=]context] [--workload [name=]context]... [flags]
+      Create read-only service accounts, start the socket collector and write an agent kubeconfig.
   kglance teardown [--state file | --context context...]
+      Remove everything setup created and revoke the agent's tokens.
   kglance version
 Run "kglance setup -h" or "kglance teardown -h" for flags.
+`
+
+const setupHelp = `usage: kglance setup [--mgmt [name=]context] [--workload [name=]context]... [flags]
+
+Creates read-only service accounts on each cluster, starts the socket collector on
+workload clusters, writes a kubeconfig for the agent and prints instructions to hand it.
+Re-running setup mints fresh tokens without restarting the collector.
+
+flags:
+`
+
+const teardownHelp = `usage: kglance teardown [--state file | --context context...]
+
+Removes everything setup created and revokes the agent's tokens.
+
+flags:
 `
 
 var collect = collector.Main
@@ -59,7 +79,7 @@ func run(args []string, out, errOut io.Writer) int {
 	case "setup":
 		var o setup.Options
 		var kubeconfig string
-		if o, kubeconfig, err = parseSetup(args[1:]); err == nil {
+		if o, kubeconfig, err = parseSetup(args[1:], errOut); err == nil {
 			o.Connect = connector(kubeconfig)
 			o.Now, o.Out, o.Err, o.PollInterval = time.Now, out, errOut, 2*time.Second
 			err = setup.Run(ctx, o)
@@ -67,7 +87,7 @@ func run(args []string, out, errOut io.Writer) int {
 	case "teardown":
 		var o teardown.Options
 		var kubeconfig string
-		if o, kubeconfig, err = parseTeardown(args[1:]); err == nil {
+		if o, kubeconfig, err = parseTeardown(args[1:], errOut); err == nil {
 			o.Connect, o.Out, o.Err = connector(kubeconfig), out, errOut
 			err = teardown.Run(ctx, o)
 		}
@@ -122,11 +142,21 @@ func absPath(p string) (string, error) {
 	return filepath.Abs(p)
 }
 
-func parseSetup(args []string) (setup.Options, string, error) {
+func newFlagSet(name, help string, errOut io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	fs.Usage = func() {
+		fmt.Fprint(errOut, help)
+		fs.PrintDefaults()
+	}
+	return fs
+}
+
+func parseSetup(args []string, errOut io.Writer) (setup.Options, string, error) {
 	var o setup.Options
 	var mgmt, workloads listFlag
 	var kubeconfig string
-	fs := flag.NewFlagSet("kglance setup", flag.ContinueOnError)
+	fs := newFlagSet("kglance setup", setupHelp, errOut)
 	fs.Var(&mgmt, "mgmt", "management cluster as [name=]context (at most once)")
 	fs.Var(&workloads, "workload", "workload cluster as [name=]context (repeatable)")
 	fs.DurationVar(&o.TTL, "ttl", time.Hour, "agent token lifetime (10m to 8h)")
@@ -178,11 +208,11 @@ func adminKubeconfigs(explicit string) []string {
 	return clientcmd.NewDefaultClientConfigLoadingRules().GetLoadingPrecedence()
 }
 
-func parseTeardown(args []string) (teardown.Options, string, error) {
+func parseTeardown(args []string, errOut io.Writer) (teardown.Options, string, error) {
 	var o teardown.Options
 	var contexts listFlag
 	var kubeconfig string
-	fs := flag.NewFlagSet("kglance teardown", flag.ContinueOnError)
+	fs := newFlagSet("kglance teardown", teardownHelp, errOut)
 	fs.StringVar(&o.StatePath, "state", "kglance.state.json", "state file written by setup")
 	fs.Var(&contexts, "context", "without a state file, remove objects labelled app.kubernetes.io/managed-by=kglance from this context (repeatable)")
 	fs.StringVar(&kubeconfig, "kubeconfig", "", "admin kubeconfig (default $KUBECONFIG or ~/.kube/config)")

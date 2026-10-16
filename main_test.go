@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,7 +18,7 @@ import (
 )
 
 func TestParseSetupDefaults(t *testing.T) {
-	o, kc, err := parseSetup([]string{"--workload", "kind-t1"})
+	o, kc, err := parseSetup([]string{"--workload", "kind-t1"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func TestParseSetupDefaults(t *testing.T) {
 
 func TestParseSetupAllFlags(t *testing.T) {
 	o, kc, err := parseSetup([]string{"--mgmt", "mgmt=m-ctx", "--workload", "wl1=a", "--workload", "wl2=b", "--ttl", "2h", "-o", "x.kubeconfig",
-		"--state", "s.json", "--image", "img:2", "--interval", "30s", "--instructions", "i.txt", "--wait", "0s", "--kubeconfig", "/admin"})
+		"--state", "s.json", "--image", "img:2", "--interval", "30s", "--instructions", "i.txt", "--wait", "0s", "--kubeconfig", "/admin"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestParseSetupAllFlags(t *testing.T) {
 		o.InstructionsPath != "i.txt" || o.Wait != 0 || kc != "/admin" {
 		t.Fatalf("%+v", o)
 	}
-	o2, _, err := parseSetup([]string{"--workload", "a", "--output", "y.kubeconfig"})
+	o2, _, err := parseSetup([]string{"--workload", "a", "--output", "y.kubeconfig"}, io.Discard)
 	if err != nil || filepath.Base(o2.KubeconfigPath) != "y.kubeconfig" {
 		t.Fatalf("--output: %+v %v", o2, err)
 	}
@@ -60,18 +61,18 @@ func TestParseSetupRejectsBadInput(t *testing.T) {
 		{"--mgmt", "a", "--mgmt", "b"},
 		{"--workload", "a", "extra"},
 	} {
-		if _, _, err := parseSetup(args); err == nil {
+		if _, _, err := parseSetup(args, io.Discard); err == nil {
 			t.Errorf("%v: expected error", args)
 		}
 	}
 }
 
 func TestParseTeardown(t *testing.T) {
-	o, kc, err := parseTeardown([]string{"--context", "a", "--context", "b", "--kubeconfig", "/k"})
+	o, kc, err := parseTeardown([]string{"--context", "a", "--context", "b", "--kubeconfig", "/k"}, io.Discard)
 	if err != nil || len(o.Contexts) != 2 || o.Contexts[1] != "b" || kc != "/k" || filepath.Base(o.StatePath) != "kglance.state.json" {
 		t.Fatalf("%+v %v", o, err)
 	}
-	o, _, err = parseTeardown([]string{"--state", "s.json"})
+	o, _, err = parseTeardown([]string{"--state", "s.json"}, io.Discard)
 	if err != nil || filepath.Base(o.StatePath) != "s.json" || len(o.Contexts) != 0 {
 		t.Fatalf("%+v %v", o, err)
 	}
@@ -97,11 +98,11 @@ func TestRunDispatch(t *testing.T) {
 
 func TestParseSetupRecordsAdminKubeconfigs(t *testing.T) {
 	t.Setenv("KUBECONFIG", "/a"+string(os.PathListSeparator)+"/b")
-	o, _, err := parseSetup([]string{"--workload", "x"})
+	o, _, err := parseSetup([]string{"--workload", "x"}, io.Discard)
 	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/a", "/b"}) {
 		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
 	}
-	o, _, err = parseSetup([]string{"--workload", "x", "--kubeconfig", "/admin"})
+	o, _, err = parseSetup([]string{"--workload", "x", "--kubeconfig", "/admin"}, io.Discard)
 	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/admin"}) {
 		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
 	}
@@ -120,6 +121,20 @@ func TestRunPrintsVersion(t *testing.T) {
 		run(args, &out, &errOut)
 		if got := out.String() + errOut.String(); !strings.HasPrefix(got, want) || !strings.Contains(got, "usage:") {
 			t.Errorf("%v: %q", args, got)
+		}
+	}
+}
+
+func TestHelpDescribesCommands(t *testing.T) {
+	cases := map[string]string{
+		"--help":      "Create read-only service accounts",
+		"setup -h":    "Re-running setup mints fresh tokens",
+		"teardown -h": "revokes the agent's tokens",
+	}
+	for args, want := range cases {
+		var out, errOut bytes.Buffer
+		if code := run(strings.Fields(args), &out, &errOut); code != 0 || !strings.Contains(out.String()+errOut.String(), want) {
+			t.Errorf("%s: %d %q", args, code, out.String()+errOut.String())
 		}
 	}
 }
