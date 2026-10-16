@@ -108,7 +108,7 @@ func TestParseSetupRecordsAdminKubeconfigs(t *testing.T) {
 }
 
 func TestRunPrintsVersion(t *testing.T) {
-	want := "kglance " + version.String() + "\ncollector image " + version.Image() + "\n"
+	want := "kglance dev\ncollector image ghcr.io/rosenhouse-bot-sandbox/kglance:latest\n"
 	for _, args := range [][]string{{"version"}, {"--version"}} {
 		var out bytes.Buffer
 		if code := run(args, &out, &bytes.Buffer{}); code != 0 || out.String() != want {

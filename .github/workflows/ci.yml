@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,6 +16,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Check the tag is a v0 or v1 semver
+        if: github.ref_type == 'tag'
+        run: '[[ "$GITHUB_REF_NAME" =~ ^v[01]\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]'
       - run: go vet ./... && go vet -tags e2e ./e2e
       - run: go test ./...
 
@@ -50,6 +56,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/rosenhouse-bot-sandbox/kglance
+          flavor: latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
@@ -75,6 +82,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-ci' }}
       - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
         with:
           name: binaries
           path: dist/
@@ -92,8 +100,9 @@ jobs:
           path: dist
       - name: Check the released image reports this version
         run: |
-          got=$(docker run --rm "ghcr.io/rosenhouse-bot-sandbox/kglance:$GITHUB_REF_NAME" version | head -1)
-          [[ "$got" == "kglance $GITHUB_REF_NAME" ]] || { echo "image reports \"$got\""; exit 1; }
+          image=ghcr.io/rosenhouse-bot-sandbox/kglance:$GITHUB_REF_NAME
+          got=$(docker run --rm "$image" version)
+          [[ "$got" == "kglance $GITHUB_REF_NAME"$'\n'"collector image $image" ]] || { echo "image reports \"$got\""; exit 1; }
       - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $PRERELEASE dist/*
         env:
           GH_TOKEN: ${{ github.token }}

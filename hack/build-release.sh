@@ -11,8 +11,10 @@ for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
 done
 (cd "$out" && sha256sum kglance-* > SHA256SUMS)
 
-got=$("$out/kglance-$(go env GOOS)-$(go env GOARCH)" version | head -1)
-if [[ "$got" != "kglance $version" ]]; then
-  echo "built binary reports \"$got\", want \"kglance $version\"" >&2
+got=$("$out/kglance-$(go env GOOS)-$(go env GOARCH)" version)
+want="kglance $version
+collector image ghcr.io/rosenhouse-bot-sandbox/kglance:$version"
+if [[ "$got" != "$want" ]]; then
+  echo "built binary reports \"$got\", want \"$want\"" >&2
   exit 1
 fi

@@ -7,11 +7,11 @@ import (
 )
 
 const (
-	Dev  = "dev"
+	dev  = "dev"
 	repo = "ghcr.io/rosenhouse-bot-sandbox/kglance"
 )
 
-// tag is set by release builds with -ldflags "-X github.com/rosenhouse-bot-sandbox/kglance/internal/version.tag=vX.Y.Z".
+// tag is set at link time by release builds.
 var tag string
 
 var (
@@ -19,7 +19,7 @@ var (
 	pseudo  = regexp.MustCompile(`\d{14}-[0-9a-f]{12}$`)
 )
 
-// String returns the release tag, or Dev for builds not made from a tag.
+// String returns the release tag, or "dev" for builds not made from a tag.
 func String() string {
 	var buildInfo string
 	if bi, ok := debug.ReadBuildInfo(); ok {
@@ -37,13 +37,13 @@ func resolve(ldflag, buildInfo string) string {
 		v = buildInfo
 	}
 	if !release.MatchString(v) || pseudo.MatchString(v) {
-		return Dev
+		return dev
 	}
 	return v
 }
 
 func imageFor(v string) string {
-	if v == Dev {
+	if v == dev {
 		return repo + ":latest"
 	}
 	return repo + ":" + v

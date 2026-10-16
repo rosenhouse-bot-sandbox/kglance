@@ -43,13 +43,13 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func versionLine() string {
+func versionInfo() string {
 	return fmt.Sprintf("kglance %s\ncollector image %s\n", version.String(), version.Image())
 }
 
 func run(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(errOut, versionLine()+usage)
+		fmt.Fprint(errOut, versionInfo()+usage)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -74,13 +74,13 @@ func run(args []string, out, errOut io.Writer) int {
 	case "collect":
 		err = collect(ctx, args[1:])
 	case "version", "--version":
-		fmt.Fprint(out, versionLine())
+		fmt.Fprint(out, versionInfo())
 		return 0
 	case "-h", "--help", "help":
-		fmt.Fprint(out, versionLine()+usage)
+		fmt.Fprint(out, versionInfo()+usage)
 		return 0
 	default:
-		fmt.Fprint(errOut, versionLine()+usage)
+		fmt.Fprint(errOut, versionInfo()+usage)
 		return 2
 	}
 	switch {
