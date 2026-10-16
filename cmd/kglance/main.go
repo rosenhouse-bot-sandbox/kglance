@@ -18,12 +18,14 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/setup"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/teardown"
+	"github.com/rosenhouse-bot-sandbox/kglance/internal/version"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 const usage = `usage:
   kglance setup [--mgmt [name=]context] [--workload [name=]context]... [flags]
   kglance teardown [--state file | --context context...]
+  kglance version
 Run "kglance setup -h" or "kglance teardown -h" for flags.
 `
 
@@ -41,9 +43,13 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+func versionLine() string {
+	return fmt.Sprintf("kglance %s\ncollector image %s\n", version.String(), version.Image())
+}
+
 func run(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(errOut, usage)
+		fmt.Fprint(errOut, versionLine()+usage)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -67,11 +73,14 @@ func run(args []string, out, errOut io.Writer) int {
 		}
 	case "collect":
 		err = collect(ctx, args[1:])
+	case "version", "--version":
+		fmt.Fprint(out, versionLine())
+		return 0
 	case "-h", "--help", "help":
-		fmt.Fprint(out, usage)
+		fmt.Fprint(out, versionLine()+usage)
 		return 0
 	default:
-		fmt.Fprint(errOut, usage)
+		fmt.Fprint(errOut, versionLine()+usage)
 		return 2
 	}
 	switch {
@@ -124,7 +133,7 @@ func parseSetup(args []string) (setup.Options, string, error) {
 	fs.StringVar(&o.KubeconfigPath, "output", "agent.kubeconfig", "agent kubeconfig path")
 	fs.StringVar(&o.KubeconfigPath, "o", "agent.kubeconfig", "shorthand for --output")
 	fs.StringVar(&o.StatePath, "state", "kglance.state.json", "state file path")
-	fs.StringVar(&o.Image, "image", kube.DefaultImage, "collector image")
+	fs.StringVar(&o.Image, "image", version.Image(), "collector image")
 	fs.DurationVar(&o.Interval, "interval", time.Minute, "socket snapshot interval")
 	fs.StringVar(&o.InstructionsPath, "instructions", "", "also write agent instructions to this file")
 	fs.DurationVar(&o.Wait, "wait", 2*time.Minute, "how long to wait for collector pods to become ready")

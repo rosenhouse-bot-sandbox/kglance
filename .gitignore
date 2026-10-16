@@ -1,3 +1,4 @@
 /kglance
 kglance.state.json
 *.kubeconfig
+dist/

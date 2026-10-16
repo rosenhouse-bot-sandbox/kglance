@@ -14,5 +14,4 @@ const (
 	CollectorDS         = "kglance-collector"
 	ClusterEnv          = "KGLANCE_CLUSTER"
 	NodeEnv             = "KGLANCE_NODE"
-	DefaultImage        = "ghcr.io/rosenhouse-bot-sandbox/kglance:latest"
 )

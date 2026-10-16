@@ -6,11 +6,15 @@ A human with admin access runs kglance. The agent only uses `kubectl`.
 
 ## Install
 
+Download a binary from [Releases](https://github.com/rosenhouse-bot-sandbox/kglance/releases), or run:
+
 ```bash
 go install github.com/rosenhouse-bot-sandbox/kglance/cmd/kglance@latest
 ```
 
-The collector image is `ghcr.io/rosenhouse-bot-sandbox/kglance:latest`. Override it with `setup --image`.
+`kglance version` prints the version and its collector image, `ghcr.io/rosenhouse-bot-sandbox/kglance:<version>`.
+Builds not made from a release tag report `dev` and use the `:latest` image.
+Override the image with `setup --image`.
 
 ## Usage
 
@@ -58,3 +62,8 @@ go test ./...
 docker build -t kglance:dev .
 hack/e2e-kind.sh   # creates Kind clusters kglance-mgmt and kglance-wl
 ```
+
+## Releasing
+
+Push a `vX.Y.Z` tag.
+CI runs the tests, pushes the `vX.Y.Z` image and publishes the binaries as a GitHub Release.

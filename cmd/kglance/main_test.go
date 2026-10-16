@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/setup"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
+	"github.com/rosenhouse-bot-sandbox/kglance/internal/version"
 )
 
 func TestParseSetupDefaults(t *testing.T) {
@@ -22,7 +22,7 @@ func TestParseSetupDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	abs := func(p string) string { a, _ := filepath.Abs(p); return a }
-	if o.TTL != time.Hour || o.Interval != time.Minute || o.Wait != 2*time.Minute || o.Image != kube.DefaultImage ||
+	if o.TTL != time.Hour || o.Interval != time.Minute || o.Wait != 2*time.Minute || o.Image != version.Image() ||
 		o.KubeconfigPath != abs("agent.kubeconfig") || o.StatePath != abs("kglance.state.json") || o.InstructionsPath != "" || kc != "" {
 		t.Fatalf("%+v", o)
 	}
@@ -104,5 +104,22 @@ func TestParseSetupRecordsAdminKubeconfigs(t *testing.T) {
 	o, _, err = parseSetup([]string{"--workload", "x", "--kubeconfig", "/admin"})
 	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/admin"}) {
 		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
+	}
+}
+
+func TestRunPrintsVersion(t *testing.T) {
+	want := "kglance " + version.String() + "\ncollector image " + version.Image() + "\n"
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		var out bytes.Buffer
+		if code := run(args, &out, &bytes.Buffer{}); code != 0 || out.String() != want {
+			t.Errorf("%v: %d %q", args, code, out.String())
+		}
+	}
+	for _, args := range [][]string{{"--help"}, {}} {
+		var out, errOut bytes.Buffer
+		run(args, &out, &errOut)
+		if got := out.String() + errOut.String(); !strings.HasPrefix(got, want) || !strings.Contains(got, "usage:") {
+			t.Errorf("%v: %q", args, got)
+		}
 	}
 }
