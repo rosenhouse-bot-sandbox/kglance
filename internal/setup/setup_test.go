@@ -242,7 +242,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 		"wrote " + o.StatePath + "\n",
 		"socket collector running on 2 nodes (1 control-plane, 1 worker)\n",
 		"export KUBECONFIG=" + o.KubeconfigPath,
-		`kubectl --context wl1 -n kglance get configmaps -l kglance.io/snapshot`,
+		`kubectl --context wl1 -n kglance get configmaps -l kglance.rosenhouse-bot-sandbox.github.io/snapshot`,
 		"wrote " + o.InstructionsPath + "\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -476,7 +476,7 @@ func TestInstructionsGiveSnapshotCommandPerWorkload(t *testing.T) {
 			t.Errorf("missing %s command:\n%s", name, got)
 		}
 	}
-	if !strings.Contains(got, "kglance.io/truncated") {
+	if !strings.Contains(got, "kglance.rosenhouse-bot-sandbox.github.io/truncated") {
 		t.Errorf("no truncation note:\n%s", got)
 	}
 	if strings.Contains(got, "--context mgmt") {

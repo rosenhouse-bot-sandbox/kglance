@@ -199,7 +199,7 @@ spec:
 
 // snapshotRows fetches snapshots the way the agent instructions describe and checks them.
 func (e *env) snapshotRows(kubeconfig string, nodes map[string]string) (map[string][]map[string]any, []string) {
-	out, err := e.agent(kubeconfig, "wl1", "-n", "kglance", "get", "configmaps", "-l", "kglance.io/snapshot",
+	out, err := e.agent(kubeconfig, "wl1", "-n", "kglance", "get", "configmaps", "-l", "kglance.rosenhouse-bot-sandbox.github.io/snapshot",
 		"-o", `go-template={{range .items}}{{index .data "sockets.jsonl"}}{{end}}`)
 	if err != nil {
 		return nil, []string{err.Error()}
