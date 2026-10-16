@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,6 +16,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Check the tag is a v0 or v1 semver
+        if: github.ref_type == 'tag'
+        run: '[[ "$GITHUB_REF_NAME" =~ ^v[01]\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]'
       - run: go vet ./... && go vet -tags e2e ./e2e
       - run: go test ./...
 
@@ -50,6 +56,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/rosenhouse-bot-sandbox/kglance
+          flavor: latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
@@ -61,3 +68,42 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+  binaries:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: hack/build-release.sh "$VERSION" dist
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-ci' }}
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
+        with:
+          name: binaries
+          path: dist/
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [image, binaries]
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+      - name: Check the released image reports this version
+        run: |
+          image=ghcr.io/rosenhouse-bot-sandbox/kglance:$GITHUB_REF_NAME
+          got=$(docker run --rm "$image" version)
+          [[ "$got" == "kglance $GITHUB_REF_NAME"$'\n'"collector image $image" ]] || { echo "image reports \"$got\""; exit 1; }
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $PRERELEASE dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ contains(github.ref_name, '-') && '--prerelease' || '' }}
