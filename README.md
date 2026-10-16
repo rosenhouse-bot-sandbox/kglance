@@ -9,7 +9,7 @@ A human with admin access runs kglance. The agent only uses `kubectl`.
 Download a binary from [Releases](https://github.com/rosenhouse-bot-sandbox/kglance/releases), or run:
 
 ```bash
-go install github.com/rosenhouse-bot-sandbox/kglance/cmd/kglance@latest
+go install github.com/rosenhouse-bot-sandbox/kglance@latest
 ```
 
 `kglance version` prints the version and its collector image, `ghcr.io/rosenhouse-bot-sandbox/kglance:<version>`.
