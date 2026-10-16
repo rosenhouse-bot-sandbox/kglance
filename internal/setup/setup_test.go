@@ -443,6 +443,9 @@ func TestParseWorkload(t *testing.T) {
 		{"wl1=", "", "", false},
 		{"wl1=c1", "", "", false},
 		{"ns1/c1/x", "", "", false},
+		{"a/b=ns1/c1", "", "", false},
+		{"x y=ns1/c1", "", "", false},
+		{"a=b=ns1/c1", "", "", false},
 	}
 	for _, c := range cases {
 		got, err := ParseWorkload(c.in)

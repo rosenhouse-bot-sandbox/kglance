@@ -287,9 +287,32 @@ func TestRunByLabelDeletesLabelledObjectsOnly(t *testing.T) {
 	}
 }
 
+func TestRunByLabelConnectsToGivenContext(t *testing.T) {
+	h := newHarness(t, "wl1")
+	o := h.options(t)
+	os.Remove(o.StatePath)
+	o.ByLabel, o.MgmtContext = true, "other-ctx"
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), `"other-ctx"`) {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestRunByLabelRefusesWhileStateFileExists(t *testing.T) {
+	h := newHarness(t, "wl1")
+	o := h.options(t)
+	o.ByLabel = true
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run kglance teardown without --context or --workload") {
+		t.Fatalf("err %v", err)
+	}
+	if !installed(t, h.clusters["wl1"].cs) {
+		t.Error("removed objects")
+	}
+}
+
 func TestRunByLabelReportsUnreachableCluster(t *testing.T) {
 	h := newHarness(t, "wl1")
 	o := h.options(t)
+	os.Remove(o.StatePath)
 	o.ByLabel, o.Workloads = true, []string{"ns1/gone", "ns1/wl1"}
 	err := Run(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "Cluster ns1/gone") || !strings.Contains(h.err.String(), "ns1/gone-kubeconfig") {
@@ -320,7 +343,7 @@ func TestRunKeepsClusterWhoseKubeconfigSecretIsGone(t *testing.T) {
 	if err := Run(context.Background(), o); err == nil {
 		t.Fatal("expected error")
 	}
-	if !installed(t, h.clusters["wl1"].cs) || !strings.Contains(h.err.String(), "ns1/wl1-kubeconfig") {
+	if !installed(t, h.clusters["wl1"].cs) || !strings.Contains(h.err.String(), "if Cluster ns1/wl1 was deleted, remove its record from "+o.StatePath) {
 		t.Errorf("stderr %q", h.err.String())
 	}
 	if st, err := state.Load(o.StatePath); err != nil || len(st.Clusters) != 1 {

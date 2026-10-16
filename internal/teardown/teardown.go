@@ -14,6 +14,7 @@ import (
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -81,6 +82,9 @@ func byState(ctx context.Context, o Options) error {
 	for _, c := range st.Clusters {
 		s, err := removeRecorded(ctx, o, c)
 		skipped = append(skipped, s...)
+		if apierrors.IsNotFound(err) && c.ClusterRef != "" {
+			err = fmt.Errorf("%w; if Cluster %s was deleted, remove its record from %s", err, c.ClusterRef, o.StatePath)
+		}
 		if err != nil {
 			fmt.Fprintf(o.Err, "\n%s: %v", c.Name, err)
 			failed = append(failed, c)
@@ -178,6 +182,9 @@ func removeRecorded(ctx context.Context, o Options, c state.Cluster) (skipped []
 }
 
 func byLabel(ctx context.Context, o Options) error {
+	if _, err := os.Stat(o.StatePath); err == nil {
+		return fmt.Errorf("%s exists; run kglance teardown without --context or --workload", o.StatePath)
+	}
 	mgmt, err := o.Connect(o.MgmtContext)
 	if err != nil {
 		return err

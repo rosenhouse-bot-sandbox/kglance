@@ -6,13 +6,14 @@ import (
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 )
 
 // SplitClusterRef parses a Cluster API Cluster reference "namespace/name".
 func SplitClusterRef(ref string) (namespace, name string, err error) {
 	namespace, name, _ = strings.Cut(ref, "/")
-	if namespace == "" || name == "" || strings.Contains(name, "/") {
+	if len(validation.IsDNS1123Label(namespace)) > 0 || len(validation.IsDNS1123Subdomain(name)) > 0 {
 		return "", "", fmt.Errorf("invalid Cluster %q: want namespace/name", ref)
 	}
 	return namespace, name, nil

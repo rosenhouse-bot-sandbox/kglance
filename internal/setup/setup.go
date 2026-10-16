@@ -16,6 +16,7 @@ import (
 	authv1 "k8s.io/api/authentication/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -42,11 +43,11 @@ func ParseWorkload(s string) (Workload, error) {
 		ref = name
 	}
 	_, cluster, err := kube.SplitClusterRef(ref)
-	if err != nil || name == "" {
-		return Workload{}, fmt.Errorf("invalid --workload %q: want [name=]namespace/cluster", s)
-	}
 	if !found {
 		name = cluster
+	}
+	if err != nil || len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return Workload{}, fmt.Errorf("invalid --workload %q: want [name=]namespace/cluster", s)
 	}
 	return Workload{Name: name, Cluster: ref}, nil
 }

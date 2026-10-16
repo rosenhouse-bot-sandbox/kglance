@@ -29,7 +29,7 @@ func TestSplitClusterRef(t *testing.T) {
 	if err != nil || ns != "ns1" || name != "wl1" {
 		t.Fatalf("%q %q %v", ns, name, err)
 	}
-	for _, bad := range []string{"", "wl1", "ns1/", "/wl1", "a/b/c"} {
+	for _, bad := range []string{"", "wl1", "ns1/", "/wl1", "a/b/c", "a=b/c", "ns1/Wl1", "ns 1/wl1"} {
 		if _, _, err := SplitClusterRef(bad); err == nil {
 			t.Errorf("%q: expected error", bad)
 		}

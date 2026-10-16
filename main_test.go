@@ -68,7 +68,7 @@ func TestParseSetupRejectsBadInput(t *testing.T) {
 }
 
 func TestParseTeardown(t *testing.T) {
-	o, kc, err := parseTeardown([]string{"--context", "a", "--workload", "ns1/b", "--workload", "c=ns2/c", "--kubeconfig", "/k"}, io.Discard)
+	o, kc, err := parseTeardown([]string{"--context", "a", "--workload", "ns1/b", "--workload", "ns2/c", "--kubeconfig", "/k"}, io.Discard)
 	if err != nil || !o.ByLabel || o.MgmtContext != "a" || !slices.Equal(o.Workloads, []string{"ns1/b", "ns2/c"}) || kc != "/k" || filepath.Base(o.StatePath) != "kglance.state.json" {
 		t.Fatalf("%+v %v", o, err)
 	}
@@ -80,8 +80,10 @@ func TestParseTeardown(t *testing.T) {
 	if err != nil || filepath.Base(o.StatePath) != "s.json" || o.ByLabel {
 		t.Fatalf("%+v %v", o, err)
 	}
-	if _, _, err := parseTeardown([]string{"--workload", "b"}, io.Discard); err == nil {
-		t.Fatal("expected error for workload without namespace")
+	for _, bad := range []string{"b", "c=ns2/c"} {
+		if _, _, err := parseTeardown([]string{"--workload", bad}, io.Discard); err == nil {
+			t.Fatalf("%s: expected error", bad)
+		}
 	}
 	if _, _, err := parseTeardown([]string{"--state", "s.json", "--context", "a"}, io.Discard); err == nil {
 		t.Fatal("expected error for --state with --context")

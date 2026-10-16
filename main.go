@@ -39,10 +39,10 @@ Creates read-only service accounts on each cluster, starts the socket collector 
 workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
 
-The admin context is the Cluster API management cluster. Each --workload names a
-Cluster on it. Setup reaches that cluster with the admin kubeconfig in the Cluster's
-<cluster>-kubeconfig Secret. The agent kubeconfig has a context "mgmt" and one
-context per workload, named after the Cluster unless name= is given.
+--context, or the current context by default, names the Cluster API management cluster.
+Each --workload names a Cluster on it. Setup reaches that cluster with the admin
+kubeconfig in the Cluster's <cluster>-kubeconfig Secret. The agent kubeconfig has a
+context "mgmt" and one context per workload, named after the Cluster unless name= is given.
 
 flags:
 `
@@ -231,17 +231,20 @@ func parseTeardown(args []string, errOut io.Writer) (teardown.Options, string, e
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	o.ByLabel = set["context"] || set["workload"]
-	ws, err := parseWorkloads(workloads)
-	if err == nil && o.ByLabel && set["state"] {
+	var err error
+	if o.ByLabel && set["state"] {
 		err = errors.New("--state cannot be combined with --context or --workload")
+	}
+	for _, ref := range workloads {
+		if _, _, e := kube.SplitClusterRef(ref); e != nil {
+			err = e
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(fs.Output(), err)
 		fs.Usage()
 		return o, "", fmt.Errorf("%w: %v", errUsage, err)
 	}
-	for _, w := range ws {
-		o.Workloads = append(o.Workloads, w.Cluster)
-	}
+	o.Workloads = workloads
 	return o, kubeconfig, nil
 }

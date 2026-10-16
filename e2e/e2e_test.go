@@ -47,6 +47,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 	e.kglance("teardown", "--context", e.mgmtCtx, "--workload", workloadRef)
 	t.Cleanup(func() {
 		if t.Failed() {
+			os.Remove(filepath.Join(e.dir, "kglance.state.json"))
 			e.kglance("teardown", "--context", e.mgmtCtx, "--workload", workloadRef)
 		}
 		for _, ctx := range []string{e.mgmtCtx, e.wlCtx} {
