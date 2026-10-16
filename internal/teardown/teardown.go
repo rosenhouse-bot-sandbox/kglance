@@ -14,6 +14,7 @@ import (
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,22 +24,49 @@ import (
 
 type Options struct {
 	StatePath string
-	// Contexts selects label-based cleanup without a state file.
-	Contexts []string
-	Connect  func(context string) (*kube.Conn, error)
-	Out, Err io.Writer
+	// ByLabel removes labelled objects from MgmtContext and Workloads instead of reading the state file.
+	ByLabel bool
+	// MgmtContext is the management cluster's admin context; empty means the current context.
+	MgmtContext string
+	// Workloads are Cluster API "namespace/name" references.
+	Workloads []string
+	Connect   func(context string) (*kube.Conn, error)
+	// ConnectKubeconfig connects with a kubeconfig read from a Cluster's Secret.
+	ConnectKubeconfig func(data []byte) (*kube.Conn, error)
+	Out, Err          io.Writer
 }
 
 func Run(ctx context.Context, o Options) error {
-	if len(o.Contexts) > 0 {
+	if o.ByLabel {
 		return byLabel(ctx, o)
 	}
 	return byState(ctx, o)
 }
 
+// connect reaches the cluster at kctx, or the Cluster ref whose kubeconfig Secret is on kctx.
+func (o Options) connect(ctx context.Context, kctx, ref string) (*kube.Conn, error) {
+	conn, err := o.Connect(kctx)
+	if err != nil || ref == "" {
+		return conn, err
+	}
+	return o.connectCluster(ctx, conn, ref)
+}
+
+func (o Options) connectCluster(ctx context.Context, mgmt *kube.Conn, ref string) (*kube.Conn, error) {
+	data, err := kube.ClusterKubeconfig(ctx, mgmt.Client, ref)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := o.ConnectKubeconfig(data)
+	if err != nil {
+		return nil, fmt.Errorf("kubeconfig of Cluster %s: %w", ref, err)
+	}
+	return conn, nil
+}
+
 func byState(ctx context.Context, o Options) error {
 	if _, err := os.Stat(o.StatePath); errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%s not found; use --state or --context", o.StatePath)
+		return fmt.Errorf("%s not found; use --state, or --context and --workload", o.StatePath)
 	}
 	st, err := state.Load(o.StatePath)
 	if err != nil {
@@ -54,6 +82,9 @@ func byState(ctx context.Context, o Options) error {
 	for _, c := range st.Clusters {
 		s, err := removeRecorded(ctx, o, c)
 		skipped = append(skipped, s...)
+		if apierrors.IsNotFound(err) && c.ClusterRef != "" {
+			err = fmt.Errorf("%w; if Cluster %s was deleted, remove its record from %s", err, c.ClusterRef, o.StatePath)
+		}
 		if err != nil {
 			fmt.Fprintf(o.Err, "\n%s: %v", c.Name, err)
 			failed = append(failed, c)
@@ -118,7 +149,7 @@ func isAgentKubeconfig(path string, clusters []string) bool {
 
 // removeRecorded deletes c's recorded objects and returns those it skipped because kglance does not manage them.
 func removeRecorded(ctx context.Context, o Options, c state.Cluster) (skipped []string, err error) {
-	conn, err := o.Connect(c.Context)
+	conn, err := o.connect(ctx, c.Context, c.ClusterRef)
 	if err != nil {
 		return nil, err
 	}
@@ -127,8 +158,12 @@ func removeRecorded(ctx context.Context, o Options, c state.Cluster) (skipped []
 		return nil, err
 	}
 	if conn.Cluster.Server != c.Server || fp != c.CAFingerprint {
-		return nil, fmt.Errorf("context %s does not match the recorded cluster (server %s, CA %.12s; now %s, CA %.12s); deleted nothing",
-			c.Context, c.Server, c.CAFingerprint, conn.Cluster.Server, fp)
+		source := "context " + c.Context
+		if c.ClusterRef != "" {
+			source = "Cluster " + c.ClusterRef
+		}
+		return nil, fmt.Errorf("%s does not match the recorded cluster (server %s, CA %.12s; now %s, CA %.12s); deleted nothing",
+			source, c.Server, c.CAFingerprint, conn.Cluster.Server, fp)
 	}
 	for _, obj := range slices.Backward(c.Objects) {
 		exists, managed, err := kube.Managed(ctx, conn.Client, obj.Kind, obj.Namespace, obj.Name)
@@ -147,16 +182,31 @@ func removeRecorded(ctx context.Context, o Options, c state.Cluster) (skipped []
 }
 
 func byLabel(ctx context.Context, o Options) error {
+	if _, err := os.Stat(o.StatePath); err == nil {
+		return fmt.Errorf("%s exists; run kglance teardown without --context or --workload", o.StatePath)
+	}
+	mgmt, err := o.Connect(o.MgmtContext)
+	if err != nil {
+		return err
+	}
 	var failed []string
-	for _, kctx := range o.Contexts {
-		fmt.Fprintf(o.Out, "removing kglance from context %s ... ", kctx)
-		if err := removeLabelled(ctx, o, kctx); err != nil {
+	remove := func(name string, conn *kube.Conn, err error) {
+		fmt.Fprintf(o.Out, "removing kglance from %s ... ", name)
+		if err == nil {
+			err = removeLabelled(ctx, conn)
+		}
+		if err != nil {
 			fmt.Fprintln(o.Out, "failed")
-			fmt.Fprintf(o.Err, "%s: %v\n", kctx, err)
-			failed = append(failed, kctx)
-			continue
+			fmt.Fprintf(o.Err, "%s: %v\n", name, err)
+			failed = append(failed, name)
+			return
 		}
 		fmt.Fprintln(o.Out, "done")
+	}
+	remove("context "+mgmt.Context, mgmt, nil)
+	for _, ref := range o.Workloads {
+		conn, err := o.connectCluster(ctx, mgmt, ref)
+		remove("Cluster "+ref, conn, err)
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("teardown failed on %s", strings.Join(failed, ", "))
@@ -165,11 +215,7 @@ func byLabel(ctx context.Context, o Options) error {
 }
 
 // removeLabelled deletes managed-by=kglance objects of every kind setup creates, namespaced ones first.
-func removeLabelled(ctx context.Context, o Options, kctx string) error {
-	conn, err := o.Connect(kctx)
-	if err != nil {
-		return err
-	}
+func removeLabelled(ctx context.Context, conn *kube.Conn) error {
 	cs, ns := conn.Client, kube.Namespace
 	sel := metav1.ListOptions{LabelSelector: kube.ManagedByLabel + "=" + kube.ManagedByValue}
 	listers := []struct {

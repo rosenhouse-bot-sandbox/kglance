@@ -16,6 +16,7 @@ import (
 	authv1 "k8s.io/api/authentication/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -25,26 +26,36 @@ const (
 	MaxTTL = 8 * time.Hour
 )
 
-type Target struct {
-	Name    string
-	Role    string
-	Context string
+// MgmtName is the management cluster's context name in the agent kubeconfig.
+const MgmtName = "mgmt"
+
+// Workload is a Cluster API Cluster and its context name in the agent kubeconfig.
+type Workload struct {
+	Name string
+	// Cluster is "namespace/name".
+	Cluster string
 }
 
-// ParseTarget parses "[name=]context".
-func ParseTarget(role, s string) (Target, error) {
-	name, ctx, found := strings.Cut(s, "=")
+// ParseWorkload parses "[name=]namespace/cluster".
+func ParseWorkload(s string) (Workload, error) {
+	name, ref, found := strings.Cut(s, "=")
 	if !found {
-		ctx = name
+		ref = name
 	}
-	if name == "" || ctx == "" {
-		return Target{}, fmt.Errorf("invalid --%s %q: want [name=]context", role, s)
+	_, cluster, err := kube.SplitClusterRef(ref)
+	if !found {
+		name = cluster
 	}
-	return Target{Name: name, Role: role, Context: ctx}, nil
+	if err != nil || len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return Workload{}, fmt.Errorf("invalid --workload %q: want [name=]namespace/cluster", s)
+	}
+	return Workload{Name: name, Cluster: ref}, nil
 }
 
 type Options struct {
-	Targets          []Target
+	// MgmtContext is the management cluster's admin context; empty means the current context.
+	MgmtContext      string
+	Workloads        []Workload
 	TTL              time.Duration
 	KubeconfigPath   string
 	StatePath        string
@@ -55,26 +66,19 @@ type Options struct {
 	PollInterval     time.Duration
 	AdminKubeconfigs []string
 	Connect          func(context string) (*kube.Conn, error)
-	Now              func() time.Time
-	Out, Err         io.Writer
+	// ConnectKubeconfig connects with a kubeconfig read from a Cluster's Secret.
+	ConnectKubeconfig func(data []byte) (*kube.Conn, error)
+	Now               func() time.Time
+	Out, Err          io.Writer
 }
 
 func (o *Options) Validate() error {
-	if len(o.Targets) == 0 {
-		return errors.New("at least one --mgmt or --workload is required")
-	}
-	names, mgmts := map[string]bool{}, 0
-	for _, t := range o.Targets {
-		if names[t.Name] {
-			return fmt.Errorf("duplicate cluster name %q", t.Name)
+	names := map[string]bool{MgmtName: true}
+	for _, w := range o.Workloads {
+		if names[w.Name] {
+			return fmt.Errorf("duplicate cluster name %q", w.Name)
 		}
-		names[t.Name] = true
-		if t.Role == state.RoleMgmt {
-			mgmts++
-		}
-	}
-	if mgmts > 1 {
-		return errors.New("at most one --mgmt is allowed")
+		names[w.Name] = true
 	}
 	if o.TTL < MinTTL || o.TTL > MaxTTL {
 		return fmt.Errorf("--ttl must be between %v and %v", MinTTL, MaxTTL)
@@ -89,11 +93,11 @@ func (o *Options) Validate() error {
 }
 
 type cluster struct {
-	Target
-	conn   *kube.Conn
-	record state.Cluster
-	token  string
-	expiry time.Time
+	Name, Role string
+	conn       *kube.Conn
+	record     state.Cluster
+	token      string
+	expiry     time.Time
 }
 
 func Run(ctx context.Context, o Options) error {
@@ -107,7 +111,7 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	clusters, err := connectAll(o, st)
+	clusters, err := connectAll(ctx, o, st)
 	if err != nil {
 		return err
 	}
@@ -139,7 +143,7 @@ func Run(ctx context.Context, o Options) error {
 
 	collectorErr := reportCollectors(ctx, o, clusters)
 
-	text := Instructions(o.KubeconfigPath, expiry, o.Targets)
+	text := Instructions(o.KubeconfigPath, expiry, o.Workloads)
 	fmt.Fprint(o.Out, "\n"+text)
 	if o.InstructionsPath != "" {
 		if err := os.WriteFile(o.InstructionsPath, []byte(text), 0o644); err != nil {
@@ -175,40 +179,60 @@ func names(clusters []*cluster) []string {
 
 func clock(t time.Time) string { return t.UTC().Format("15:04 UTC") }
 
-// connectAll connects to every target and checks it against the recorded state before anything changes.
-func connectAll(o Options, st *state.File) ([]*cluster, error) {
+// connectAll connects to every cluster and checks it against the recorded state before anything changes.
+func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, error) {
+	mgmt, err := o.Connect(o.MgmtContext)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", MgmtName, err)
+	}
 	var out []*cluster
-	for _, t := range o.Targets {
-		conn, err := o.Connect(t.Context)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", t.Name, err)
-		}
+	add := func(name, role, ref string, conn *kube.Conn) error {
 		fp, err := state.Fingerprint(conn.Cluster.CertificateAuthorityData)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", t.Name, err)
+			return err
 		}
-		c := &cluster{Target: t, conn: conn, record: state.Cluster{
-			Name: t.Name, Role: t.Role, Context: t.Context, Server: conn.Cluster.Server, CAFingerprint: fp,
+		c := &cluster{Name: name, Role: role, conn: conn, record: state.Cluster{
+			Name: name, Role: role, Context: mgmt.Context, ClusterRef: ref, Server: conn.Cluster.Server, CAFingerprint: fp,
 		}}
 		for _, prev := range out {
 			if prev.record.Server == c.record.Server && prev.record.CAFingerprint == fp {
-				return nil, fmt.Errorf("%s and %s point to the same cluster", prev.Name, t.Name)
+				return fmt.Errorf("%s and %s point to the same cluster", prev.Name, name)
 			}
 		}
 		for _, rec := range st.Clusters {
 			sameCluster := rec.Server == c.record.Server && rec.CAFingerprint == fp
 			switch {
-			case rec.Name == t.Name && !sameCluster:
-				return nil, fmt.Errorf("%s: recorded with server %s but context %s now points to %s; run kglance teardown first", t.Name, rec.Server, t.Context, c.record.Server)
-			case rec.Name == t.Name && rec.Role != t.Role:
-				return nil, fmt.Errorf("%s: recorded as %s, not %s; run kglance teardown first", t.Name, rec.Role, t.Role)
-			case rec.Name != t.Name && sameCluster:
-				return nil, fmt.Errorf("%s: same cluster is already recorded as %s", t.Name, rec.Name)
-			case rec.Name == t.Name:
+			case rec.Name == name && !sameCluster:
+				return fmt.Errorf("recorded with server %s but now points to %s; run kglance teardown first", rec.Server, c.record.Server)
+			case rec.Name == name && rec.Role != role:
+				return fmt.Errorf("recorded as %s, not %s; run kglance teardown first", rec.Role, role)
+			case rec.Name != name && sameCluster:
+				return fmt.Errorf("same cluster is already recorded as %s", rec.Name)
+			case rec.Name == name:
 				c.record.Objects = slices.Clone(rec.Objects)
 			}
 		}
 		out = append(out, c)
+		return nil
+	}
+	if err := add(MgmtName, state.RoleMgmt, "", mgmt); err != nil {
+		return nil, fmt.Errorf("%s: %w", MgmtName, err)
+	}
+	for _, w := range o.Workloads {
+		err := func() error {
+			data, err := kube.ClusterKubeconfig(ctx, mgmt.Client, w.Cluster)
+			if err != nil {
+				return err
+			}
+			conn, err := o.ConnectKubeconfig(data)
+			if err != nil {
+				return fmt.Errorf("kubeconfig of Cluster %s: %w", w.Cluster, err)
+			}
+			return add(w.Name, state.RoleWorkload, w.Cluster, conn)
+		}()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", w.Name, err)
+		}
 	}
 	return out, nil
 }
