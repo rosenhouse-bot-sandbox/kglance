@@ -1,59 +1,53 @@
 # kglance
 
-kglance gives an AI agent expiring, read-only `kubectl` access to Cluster API management and workload clusters.
-It also runs a DaemonSet that snapshots every node's listening TCP/UDP sockets, attributed to pods and containers.
-A human with admin access runs kglance. The agent only uses `kubectl`.
+kglance lets a cluster admin hand an AI agent temporary, read-only `kubectl` access to Cluster API management and workload clusters, then take it back.
+
+The agent gets only a kubeconfig with expiring tokens and never sees admin credentials.
+An admin runs kglance; the agent runs `kubectl`.
+On each workload cluster, kglance also runs a collector that records which ports are listening on every node, attributed to pods and containers, so the agent can see that without exec or host access.
 
 ## Install
-
-Download a binary from [Releases](https://github.com/rosenhouse-bot-sandbox/kglance/releases), or run:
 
 ```bash
 go install github.com/rosenhouse-bot-sandbox/kglance@latest
 ```
 
-`kglance version` prints the version and its collector image, `ghcr.io/rosenhouse-bot-sandbox/kglance:<version>`.
-Builds not made from a release tag report `dev` and use the `:latest` image.
-Override the image with `setup --image`.
+Binaries are also on the [Releases](https://github.com/rosenhouse-bot-sandbox/kglance/releases) page.
 
-## Usage
+## Getting started
+
+With your admin kubeconfig active, run `setup`, naming each cluster's context:
 
 ```bash
-# Human, with the admin kubeconfig
-$ kglance setup --mgmt mgmt=mgmt-ctx --workload wl1=wl1-ctx --workload wl2=wl2-ctx --ttl 1h -o agent.kubeconfig
-wrote agent.kubeconfig (contexts: mgmt, wl1, wl2; expires 19:10 UTC)
-wrote kglance.state.json
-socket collector running on 7 nodes (3 control-plane, 4 worker)
-
-# Agent
-$ export KUBECONFIG=agent.kubeconfig
-$ kubectl --context mgmt get clusters -A
-$ kubectl --context wl1 get events -A
-$ kubectl --context wl1 -n kglance get configmaps -l kglance.rosenhouse-bot-sandbox.github.io/snapshot \
-    -o go-template='{{range .items}}{{index .data "sockets.jsonl"}}{{end}}' > wl1-sockets.jsonl
-$ head -1 wl1-sockets.jsonl
-{"cluster":"wl1","node":"wl1-cp-abc12","role":"control-plane","ts":"2026-10-15T18:42:00Z","netns":"host","proto":"tcp","local":"0.0.0.0:6443","peer":"0.0.0.0:*","state":"LISTEN","pid":1234,"process":"kube-apiserver","pod":"kube-system/kube-apiserver-wl1-cp-abc12","container":"kube-apiserver"}
-
-# Human: remove everything and revoke the agent's tokens
-$ kglance teardown
-read kglance.state.json: removing kglance from mgmt, wl1, wl2 ... done
+$ kglance setup --mgmt mgmt=mgmt-ctx --workload wl1=wl1-ctx -o agent.kubeconfig --instructions agent.md
+wrote /home/me/agent.kubeconfig (contexts: mgmt, wl1; expires 19:10 UTC)
+wrote /home/me/kglance.state.json
+socket collector running on 4 nodes (1 control-plane, 3 worker)
+...
 ```
 
-Re-running `setup` mints fresh tokens without restarting the collector.
-Without a state file, `kglance teardown --context ctx...` removes objects labelled `app.kubernetes.io/managed-by=kglance`.
-Run `kglance setup -h` for all flags.
+Give the agent `agent.kubeconfig` and `agent.md`.
+The instructions tell it which context does what and how to pull the socket snapshots.
+Tokens last one hour by default; run `setup` again to mint new ones.
 
-## Permissions
+When the agent is done, remove everything and revoke its tokens:
 
-| Who | Cluster | Access |
-|---|---|---|
-| Agent | mgmt | get/list/watch on CAPI API groups, namespaces, nodes and events. No secrets. |
-| Agent | workload | `view` without logs, exec, attach, port-forward, proxy or secrets, plus events and ConfigMaps in `kglance`. |
-| Collector | workload | get/list pods, get nodes, write ConfigMaps in `kglance`. |
+```bash
+$ kglance teardown
+read kglance.state.json: removing kglance from mgmt, wl1 ... done
+```
 
-Tokens are TokenRequest tokens with a 1h default TTL and an 8h maximum.
-The collector pod uses host network and host PID, runs as uid 0 with a read-only root filesystem,
-drops all capabilities except `SYS_PTRACE` and `DAC_READ_SEARCH`, and mounts no host paths.
+`kglance setup -h` and `kglance teardown -h` describe every flag.
+
+## What the agent can do
+
+| Cluster | Access |
+|---|---|
+| Management | get, list and watch Cluster API objects, namespaces, nodes and events, but not Secrets |
+| Workload | the `view` ClusterRole without Secrets, logs, exec, attach, port-forward or proxy |
+
+The collector runs on every Linux node of each workload cluster, including control-plane nodes.
+It uses the host network and PID namespaces with only `SYS_PTRACE` and `DAC_READ_SEARCH`, mounts no host paths and can only read pods and nodes and write its own ConfigMaps.
 
 ## Development
 
@@ -71,4 +65,5 @@ Push a `vX.Y.Z` tag, or run the `release` workflow on `main`:
 gh workflow run release.yml -f version=vX.Y.Z
 ```
 
-CI runs the tests, pushes the `vX.Y.Z` image and publishes the binaries as a GitHub Release.
+CI runs the unit and e2e tests, pushes the `ghcr.io/rosenhouse-bot-sandbox/kglance:vX.Y.Z` image and publishes the binaries as a GitHub Release.
+Each binary defaults to the collector image of its own version; `kglance version` shows both.
