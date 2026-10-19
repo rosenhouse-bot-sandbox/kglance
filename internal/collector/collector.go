@@ -83,6 +83,9 @@ func (c *Collector) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }

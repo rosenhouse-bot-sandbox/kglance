@@ -259,6 +259,26 @@ func TestRunStartsWithoutWaitingForInterval(t *testing.T) {
 	}
 }
 
+// With a tick pending when cancellation arrives, select picks either case at random, so repeat.
+func TestRunTakesNoSnapshotAfterCancellation(t *testing.T) {
+	const interval = time.Millisecond
+	for range 20 {
+		client := fake.NewClientset(fixtureObjects()...)
+		var applies atomic.Int32
+		ctx, cancel := context.WithCancel(context.Background())
+		client.PrependReactor("patch", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+			applies.Add(1)
+			cancel()
+			time.Sleep(5 * interval)
+			return false, nil, nil
+		})
+		newCollector(client, "cp1").Run(ctx, interval)
+		if n := applies.Load(); n != 1 {
+			t.Fatalf("applies %d", n)
+		}
+	}
+}
+
 func TestMainValidation(t *testing.T) {
 	tests := []struct {
 		name, cluster, node string
