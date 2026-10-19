@@ -26,14 +26,14 @@ func TestParseSetupDefaults(t *testing.T) {
 		o.KubeconfigPath != abs("agent.kubeconfig") || o.StatePath != abs("kglance.state.json") || o.InstructionsPath != "" || kc != "" {
 		t.Fatalf("%+v", o)
 	}
-	if o.MgmtContext != "" || len(o.Workloads) != 0 {
+	if o.MgmtContext != "" || len(o.Workloads) != 0 || o.DryRun {
 		t.Fatalf("%+v", o)
 	}
 }
 
 func TestParseSetupAllFlags(t *testing.T) {
 	o, kc, err := parseSetup([]string{"--context", "m-ctx", "--workload", "wl1=a", "--workload", "b", "--ttl", "2h", "-o", "x.kubeconfig",
-		"--state", "s.json", "--image", "img:2", "--interval", "30s", "--instructions", "i.txt", "--wait", "0s", "--kubeconfig", "/admin", "--mgmt-namespace", "team"}, io.Discard)
+		"--state", "s.json", "--image", "img:2", "--interval", "30s", "--instructions", "i.txt", "--wait", "0s", "--kubeconfig", "/admin", "--mgmt-namespace", "team", "--dry-run"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestParseSetupAllFlags(t *testing.T) {
 	}
 	if o.TTL != 2*time.Hour || filepath.Base(o.KubeconfigPath) != "x.kubeconfig" || !filepath.IsAbs(o.KubeconfigPath) ||
 		filepath.Base(o.StatePath) != "s.json" || o.Image != "img:2" || o.Interval != 30*time.Second ||
-		o.InstructionsPath != "i.txt" || o.Wait != 0 || kc != "/admin" || o.MgmtNamespace != "team" {
+		o.InstructionsPath != "i.txt" || o.Wait != 0 || kc != "/admin" || o.MgmtNamespace != "team" || !o.DryRun {
 		t.Fatalf("%+v", o)
 	}
 	o2, _, err := parseSetup([]string{"--mgmt-namespace", "ns1", "--output", "y.kubeconfig"}, io.Discard)

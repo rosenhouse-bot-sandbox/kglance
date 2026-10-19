@@ -22,6 +22,7 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	appsv1 "k8s.io/api/apps/v1"
 	authv1 "k8s.io/api/authentication/v1"
+	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -54,6 +55,9 @@ type fakeCluster struct {
 	ready     bool
 	stale     bool
 	status    func(*appsv1.DaemonSetStatus)
+	// deny refuses the access reviews it matches; nil allows all.
+	deny    func(authzv1.ResourceAttributes) bool
+	reviews []authzv1.ResourceAttributes
 }
 
 func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCluster {
@@ -83,6 +87,12 @@ func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCl
 		}
 		tr.Status = authv1.TokenRequestStatus{Token: "tok-" + server, ExpirationTimestamp: metav1.NewTime(now.Add(ttl))}
 		return true, tr, nil
+	})
+	cs.PrependReactor("create", "selfsubjectaccessreviews", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		r := a.(k8stesting.CreateAction).GetObject().(*authzv1.SelfSubjectAccessReview).DeepCopy()
+		fc.reviews = append(fc.reviews, *r.Spec.ResourceAttributes)
+		r.Status.Allowed = fc.deny == nil || !fc.deny(*r.Spec.ResourceAttributes)
+		return true, r, nil
 	})
 	cs.PrependReactor("get", "daemonsets", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		obj, err := cs.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("daemonsets"), kube.Namespace, kube.CollectorDS)

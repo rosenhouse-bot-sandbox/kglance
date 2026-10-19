@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -67,6 +68,7 @@ type Options struct {
 	ConnectKubeconfig func(data []byte) (*kube.Conn, error)
 	Now               func() time.Time
 	Out, Err          io.Writer
+	DryRun            bool
 }
 
 func (o *Options) Validate() error {
@@ -119,6 +121,9 @@ func Run(ctx context.Context, o Options) error {
 	clusters, err := connectAll(ctx, o, st)
 	if err != nil {
 		return err
+	}
+	if o.DryRun {
+		return dryRun(ctx, o, clusters)
 	}
 	for _, c := range clusters {
 		record := func() error {
@@ -250,16 +255,14 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 
 // install applies c's objects and calls record after each one so that a partial install is recorded.
 func install(ctx context.Context, o Options, c *cluster, record func() error) error {
-	objs := kube.MgmtObjects(o.MgmtNamespace)
 	if c.Role == state.RoleWorkload {
 		if err := waitNamespaceGoneIfTerminating(ctx, o, c); err != nil {
 			return err
 		}
-		view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("read ClusterRole view: %w", err)
-		}
-		objs = kube.WorkloadObjects(view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval})
+	}
+	objs, err := objectsFor(ctx, o, c)
+	if err != nil {
+		return err
 	}
 	for _, obj := range objs {
 		kind := obj.GetObjectKind().GroupVersionKind().Kind
@@ -283,6 +286,18 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 	return nil
 }
 
+// objectsFor returns the objects setup applies to c.
+func objectsFor(ctx context.Context, o Options, c *cluster) ([]kube.Object, error) {
+	if c.Role != state.RoleWorkload {
+		return kube.MgmtObjects(o.MgmtNamespace), nil
+	}
+	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("read ClusterRole view: %w", err)
+	}
+	return kube.WorkloadObjects(view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), nil
+}
+
 func recordOf(obj kube.Object) state.Object {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	return state.Object{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
@@ -290,19 +305,21 @@ func recordOf(obj kube.Object) state.Object {
 
 const terminatingTimeout = 2 * time.Minute
 
+func namespaceTerminating(ctx context.Context, cs kubernetes.Interface) (bool, error) {
+	ns, err := cs.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil && ns.DeletionTimestamp != nil, err
+}
+
 func waitNamespaceGoneIfTerminating(ctx context.Context, o Options, c *cluster) error {
 	deadline := time.Now().Add(terminatingTimeout)
 	warned := false
 	for {
-		ns, err := c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
+		terminating, err := namespaceTerminating(ctx, c.conn.Client)
+		if err != nil || !terminating {
 			return err
-		}
-		if ns.DeletionTimestamp == nil {
-			return nil
 		}
 		if !warned {
 			fmt.Fprintf(o.Err, "%s: waiting for namespace %s to finish terminating\n", c.Name, kube.Namespace)

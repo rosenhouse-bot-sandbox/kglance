@@ -26,6 +26,8 @@ socket collector running on 4 nodes (1 control-plane, 3 worker)
 ...
 ```
 
+Add `--dry-run` to list each change and check your permissions without making any.
+
 kglance reaches each workload cluster through the kubeconfig Secret that Cluster API keeps for it, so you don't need a context for it.
 Give the agent `agent.kubeconfig` and `agent.md`.
 The instructions tell it which context does what and how to pull the socket snapshots.
