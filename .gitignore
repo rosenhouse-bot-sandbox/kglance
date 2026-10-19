@@ -2,3 +2,4 @@
 kglance.state.json
 *.kubeconfig
 dist/
+cover.out

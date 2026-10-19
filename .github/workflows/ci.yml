@@ -20,8 +20,9 @@ jobs:
       - name: Check the tag is a v0 or v1 semver
         if: github.ref_type == 'tag'
         run: '[[ "$GITHUB_REF_NAME" =~ ^v[01]\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]'
+      - uses: extractions/setup-just@v4
       - run: go vet ./... && go vet -tags e2e ./e2e
-      - run: go test ./...
+      - run: just cover-check
 
   e2e:
     runs-on: ubuntu-latest

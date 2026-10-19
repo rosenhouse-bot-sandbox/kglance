@@ -52,11 +52,17 @@ It uses the host network and PID namespaces with only `SYS_PTRACE` and `DAC_READ
 
 ## Development
 
+Write a failing test before each change.
+The `justfile` targets need [just](https://github.com/casey/just).
+
 ```bash
-go test ./...
+just cover-check   # runs the unit tests and fails below the coverage floor
+just mutate        # runs mutation testing, which takes a few minutes
 docker build -t kglance:dev .
 hack/e2e-kind.sh   # creates Kind clusters kglance-mgmt and kglance-wl
 ```
+
+`just mutate` reports each LIVED mutant, a code change that no test catches.
 
 ## Releasing
 
