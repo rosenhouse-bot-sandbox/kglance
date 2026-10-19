@@ -17,7 +17,7 @@ import (
 )
 
 func TestParseSetupDefaults(t *testing.T) {
-	o, kc, err := parseSetup(nil, io.Discard)
+	o, kc, err := parseSetup([]string{"--mgmt-namespace", "ns1"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,21 +32,21 @@ func TestParseSetupDefaults(t *testing.T) {
 }
 
 func TestParseSetupAllFlags(t *testing.T) {
-	o, kc, err := parseSetup([]string{"--context", "m-ctx", "--workload", "wl1=ns1/a", "--workload", "ns2/b", "--ttl", "2h", "-o", "x.kubeconfig",
-		"--state", "s.json", "--image", "img:2", "--interval", "30s", "--instructions", "i.txt", "--wait", "0s", "--kubeconfig", "/admin"}, io.Discard)
+	o, kc, err := parseSetup([]string{"--context", "m-ctx", "--workload", "wl1=a", "--workload", "b", "--ttl", "2h", "-o", "x.kubeconfig",
+		"--state", "s.json", "--image", "img:2", "--interval", "30s", "--instructions", "i.txt", "--wait", "0s", "--kubeconfig", "/admin", "--mgmt-namespace", "team"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []setup.Workload{{Name: "wl1", Cluster: "ns1/a"}, {Name: "b", Cluster: "ns2/b"}}
+	want := []setup.Workload{{Name: "wl1", Cluster: "a"}, {Name: "b", Cluster: "b"}}
 	if o.MgmtContext != "m-ctx" || !slices.Equal(o.Workloads, want) {
 		t.Fatalf("%+v", o)
 	}
 	if o.TTL != 2*time.Hour || filepath.Base(o.KubeconfigPath) != "x.kubeconfig" || !filepath.IsAbs(o.KubeconfigPath) ||
 		filepath.Base(o.StatePath) != "s.json" || o.Image != "img:2" || o.Interval != 30*time.Second ||
-		o.InstructionsPath != "i.txt" || o.Wait != 0 || kc != "/admin" {
+		o.InstructionsPath != "i.txt" || o.Wait != 0 || kc != "/admin" || o.MgmtNamespace != "team" {
 		t.Fatalf("%+v", o)
 	}
-	o2, _, err := parseSetup([]string{"--output", "y.kubeconfig"}, io.Discard)
+	o2, _, err := parseSetup([]string{"--mgmt-namespace", "ns1", "--output", "y.kubeconfig"}, io.Discard)
 	if err != nil || filepath.Base(o2.KubeconfigPath) != "y.kubeconfig" {
 		t.Fatalf("--output: %+v %v", o2, err)
 	}
@@ -54,13 +54,17 @@ func TestParseSetupAllFlags(t *testing.T) {
 
 func TestParseSetupRejectsBadInput(t *testing.T) {
 	for _, args := range [][]string{
-		{"--workload", "=ns/x"},
-		{"--workload", "x"},
-		{"--workload", "ns/a", "--workload", "other/a"},
+		{},
+		{"--workload", "=x"},
+		{"--workload", "ns/x"},
+		{"--workload", "a", "--workload", "a"},
 		{"--ttl", "9h"},
 		{"--mgmt", "a"},
 		{"extra"},
 	} {
+		if len(args) > 0 {
+			args = append([]string{"--mgmt-namespace", "ns1"}, args...)
+		}
 		if _, _, err := parseSetup(args, io.Discard); err == nil {
 			t.Errorf("%v: expected error", args)
 		}
@@ -68,20 +72,23 @@ func TestParseSetupRejectsBadInput(t *testing.T) {
 }
 
 func TestParseTeardown(t *testing.T) {
-	o, kc, err := parseTeardown([]string{"--context", "a", "--workload", "ns1/b", "--workload", "ns2/c", "--kubeconfig", "/k"}, io.Discard)
-	if err != nil || !o.ByLabel || o.MgmtContext != "a" || !slices.Equal(o.Workloads, []string{"ns1/b", "ns2/c"}) || kc != "/k" || filepath.Base(o.StatePath) != "kglance.state.json" {
+	o, kc, err := parseTeardown([]string{"--mgmt-namespace", "ns1", "--context", "a", "--workload", "b", "--workload", "c", "--kubeconfig", "/k"}, io.Discard)
+	if err != nil || !o.ByLabel || o.MgmtContext != "a" || o.MgmtNamespace != "ns1" || !slices.Equal(o.Workloads, []string{"b", "c"}) || kc != "/k" || filepath.Base(o.StatePath) != "kglance.state.json" {
 		t.Fatalf("%+v %v", o, err)
 	}
-	o, _, err = parseTeardown([]string{"--workload", "ns1/b"}, io.Discard)
-	if err != nil || !o.ByLabel || o.MgmtContext != "" {
+	if _, _, err = parseTeardown([]string{"--workload", "b"}, io.Discard); err == nil || !strings.Contains(err.Error(), "--mgmt-namespace is required") {
+		t.Fatalf("without --mgmt-namespace: %v", err)
+	}
+	o, _, err = parseTeardown([]string{"--mgmt-namespace", "team"}, io.Discard)
+	if err != nil || !o.ByLabel || o.MgmtNamespace != "team" {
 		t.Fatalf("%+v %v", o, err)
 	}
 	o, _, err = parseTeardown([]string{"--state", "s.json"}, io.Discard)
 	if err != nil || filepath.Base(o.StatePath) != "s.json" || o.ByLabel {
 		t.Fatalf("%+v %v", o, err)
 	}
-	for _, bad := range []string{"b", "c=ns2/c"} {
-		if _, _, err := parseTeardown([]string{"--workload", bad}, io.Discard); err == nil {
+	for _, bad := range []string{"ns1/b", "c=c"} {
+		if _, _, err := parseTeardown([]string{"--mgmt-namespace", "ns1", "--workload", bad}, io.Discard); err == nil {
 			t.Fatalf("%s: expected error", bad)
 		}
 	}
@@ -103,18 +110,18 @@ func TestRunDispatch(t *testing.T) {
 		t.Errorf("collect: %d %q %v", code, errOut.String(), gotArgs)
 	}
 	errOut.Reset()
-	if code := run([]string{"setup", "--workload", "x"}, &bytes.Buffer{}, &errOut); code != 2 {
+	if code := run([]string{"setup", "--mgmt-namespace", "ns1", "--workload", "ns/x"}, &bytes.Buffer{}, &errOut); code != 2 {
 		t.Errorf("setup with bad workload: %d %q", code, errOut.String())
 	}
 }
 
 func TestParseSetupRecordsAdminKubeconfigs(t *testing.T) {
 	t.Setenv("KUBECONFIG", "/a"+string(os.PathListSeparator)+"/b")
-	o, _, err := parseSetup(nil, io.Discard)
+	o, _, err := parseSetup([]string{"--mgmt-namespace", "ns1"}, io.Discard)
 	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/a", "/b"}) {
 		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
 	}
-	o, _, err = parseSetup([]string{"--kubeconfig", "/admin"}, io.Discard)
+	o, _, err = parseSetup([]string{"--mgmt-namespace", "ns1", "--kubeconfig", "/admin"}, io.Discard)
 	if err != nil || !slices.Equal(o.AdminKubeconfigs, []string{"/admin"}) {
 		t.Fatalf("%v %v", o.AdminKubeconfigs, err)
 	}

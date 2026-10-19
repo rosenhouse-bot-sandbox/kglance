@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -23,7 +24,10 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -261,14 +265,20 @@ func TestRunWithoutStateFileFails(t *testing.T) {
 
 func TestRunByLabelDeletesLabelledObjectsOnly(t *testing.T) {
 	h := newHarness(t, "wl1", "wl2")
-	for _, o := range kube.MgmtObjects() {
+	for _, o := range kube.MgmtObjects("ns1") {
 		if err := kube.Apply(context.Background(), h.mgmt, o); err != nil {
 			t.Fatal(err)
 		}
 	}
+	h.mgmt.PrependReactor("*", "*", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetNamespace() != "ns1" {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: a.GetResource().Resource}, "", errors.New("outside ns1"))
+		}
+		return false, nil, nil
+	})
 	o := h.options(t)
 	os.Remove(o.StatePath)
-	o.ByLabel, o.Workloads = true, []string{"ns1/wl1"}
+	o.ByLabel, o.MgmtNamespace, o.Workloads = true, "ns1", []string{"wl1"}
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
@@ -279,8 +289,14 @@ func TestRunByLabelDeletesLabelledObjectsOnly(t *testing.T) {
 	if !installed(t, h.clusters["wl2"].cs) {
 		t.Error("wl2 touched")
 	}
-	if _, err := h.mgmt.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Errorf("mgmt namespace: %v", err)
+	ctx := context.Background()
+	_, saErr := h.mgmt.CoreV1().ServiceAccounts("ns1").Get(ctx, kube.AgentSA, metav1.GetOptions{})
+	_, rErr := h.mgmt.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRoleName, metav1.GetOptions{})
+	_, rbErr := h.mgmt.RbacV1().RoleBindings("ns1").Get(ctx, kube.AgentCAPIRoleName, metav1.GetOptions{})
+	for _, err := range []error{saErr, rErr, rbErr} {
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("mgmt: %v", err)
+		}
 	}
 	if want := "removing kglance from context mgmt-ctx ... done\nremoving kglance from Cluster ns1/wl1 ... done\n"; h.out.String() != want {
 		t.Errorf("out %q want %q", h.out.String(), want)
@@ -301,7 +317,7 @@ func TestRunByLabelRefusesWhileStateFileExists(t *testing.T) {
 	h := newHarness(t, "wl1")
 	o := h.options(t)
 	o.ByLabel = true
-	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run kglance teardown without --context or --workload") {
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run kglance teardown without --context, --workload or --mgmt-namespace") {
 		t.Fatalf("err %v", err)
 	}
 	if !installed(t, h.clusters["wl1"].cs) {
@@ -313,7 +329,7 @@ func TestRunByLabelReportsUnreachableCluster(t *testing.T) {
 	h := newHarness(t, "wl1")
 	o := h.options(t)
 	os.Remove(o.StatePath)
-	o.ByLabel, o.Workloads = true, []string{"ns1/gone", "ns1/wl1"}
+	o.ByLabel, o.MgmtNamespace, o.Workloads = true, "ns1", []string{"gone", "wl1"}
 	err := Run(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "Cluster ns1/gone") || !strings.Contains(h.err.String(), "ns1/gone-kubeconfig") {
 		t.Fatalf("err %v stderr %q", err, h.err.String())

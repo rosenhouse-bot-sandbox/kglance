@@ -50,6 +50,7 @@ type fakeCluster struct {
 	cs        *fake.Clientset
 	conn      *kube.Conn
 	tokenTTLs []int64
+	tokenNS   string
 	ready     bool
 	stale     bool
 	status    func(*appsv1.DaemonSetStatus)
@@ -65,14 +66,14 @@ func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCl
 		collectorPod("p1", "cp", true),
 		collectorPod("p2", "w1", true),
 	)
-	fc := &fakeCluster{cs: cs, ready: true, conn: &kube.Conn{Client: cs, Cluster: &clientcmdapi.Cluster{Server: server, CertificateAuthorityData: caPEM(t)}}}
+	fc := &fakeCluster{cs: cs, tokenNS: kube.Namespace, ready: true, conn: &kube.Conn{Client: cs, Cluster: &clientcmdapi.Cluster{Server: server, CertificateAuthorityData: caPEM(t)}}}
 	cs.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != "token" {
 			return false, nil, nil
 		}
 		ca := a.(k8stesting.CreateActionImpl)
 		tr := ca.GetObject().(*authv1.TokenRequest).DeepCopy()
-		if ca.Name != kube.AgentSA || ca.Namespace != kube.Namespace {
+		if ca.Name != kube.AgentSA || ca.Namespace != fc.tokenNS {
 			return true, nil, fmt.Errorf("token for %s/%s", ca.Namespace, ca.Name)
 		}
 		fc.tokenTTLs = append(fc.tokenTTLs, *tr.Spec.ExpirationSeconds)
@@ -126,6 +127,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, dir: t.TempDir(), clusters: map[string]*fakeCluster{}}
 	h.clusters["mgmt"] = newFakeCluster(t, "https://mgmt:6443", 0)
+	h.clusters["mgmt"].tokenNS = "ns1"
 	h.addWorkload("wl1", 0)
 	h.addWorkload("wl2", 0)
 	return h
@@ -162,6 +164,7 @@ func (h *harness) putKubeconfigSecret(name string, fc *fakeCluster) {
 
 func (h *harness) options(workloads ...Workload) Options {
 	return Options{
+		MgmtNamespace:    "ns1",
 		Workloads:        workloads,
 		TTL:              time.Hour,
 		KubeconfigPath:   filepath.Join(h.dir, "agent.kubeconfig"),
@@ -202,8 +205,8 @@ func (h *harness) options(workloads ...Workload) Options {
 }
 
 var (
-	wl1 = Workload{Name: "wl1", Cluster: "ns1/wl1"}
-	wl2 = Workload{Name: "wl2", Cluster: "ns1/wl2"}
+	wl1 = Workload{Name: "wl1", Cluster: "wl1"}
+	wl2 = Workload{Name: "wl2", Cluster: "wl2"}
 )
 
 func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
@@ -216,7 +219,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	ctx := context.Background()
 
 	m, w := h.clusters["mgmt"].cs, h.clusters["wl1"].cs
-	if _, err := m.RbacV1().ClusterRoles().Get(ctx, kube.AgentCAPIRole, metav1.GetOptions{}); err != nil {
+	if _, err := m.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRoleName, metav1.GetOptions{}); err != nil {
 		t.Error("mgmt: capi role missing")
 	}
 	if _, err := m.AppsV1().DaemonSets(kube.Namespace).Get(ctx, kube.CollectorDS, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -276,7 +279,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	if len(sw.Objects) != 12 || sw.Objects[11] != (state.Object{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "kglance", Name: "kglance-collector"}) {
 		t.Errorf("objects %+v", sw.Objects)
 	}
-	if sm := st.Find("mgmt"); len(sm.Objects) != 4 || sm.Context != "mgmt-ctx" || sm.ClusterRef != "" {
+	if sm := st.Find("mgmt"); len(sm.Objects) != 3 || sm.Context != "mgmt-ctx" || sm.ClusterRef != "" {
 		t.Errorf("mgmt record %+v", sm)
 	}
 
@@ -360,7 +363,7 @@ func TestRunRefusesRoleChange(t *testing.T) {
 func TestRunRefusesTwoWorkloadsOnSameCluster(t *testing.T) {
 	h := newHarness(t)
 	h.putKubeconfigSecret("alias", h.clusters["wl1"])
-	err := Run(context.Background(), h.options(wl1, Workload{Name: "alias", Cluster: "ns1/alias"}))
+	err := Run(context.Background(), h.options(wl1, Workload{Name: "alias", Cluster: "alias"}))
 	if err == nil || !strings.Contains(err.Error(), "same cluster") {
 		t.Fatalf("err %v", err)
 	}
@@ -435,17 +438,15 @@ func TestParseWorkload(t *testing.T) {
 		in, name, cluster string
 		ok                bool
 	}{
-		{"wl1=ns1/c1", "wl1", "ns1/c1", true},
-		{"ns1/c1", "c1", "ns1/c1", true},
-		{"c1", "", "", false},
+		{"wl1=c1", "wl1", "c1", true},
+		{"c1", "c1", "c1", true},
 		{"", "", "", false},
-		{"=ns1/c1", "", "", false},
+		{"=c1", "", "", false},
 		{"wl1=", "", "", false},
-		{"wl1=c1", "", "", false},
-		{"ns1/c1/x", "", "", false},
-		{"a/b=ns1/c1", "", "", false},
-		{"x y=ns1/c1", "", "", false},
-		{"a=b=ns1/c1", "", "", false},
+		{"ns1/c1", "", "", false},
+		{"wl1=ns1/c1", "", "", false},
+		{"x y=c1", "", "", false},
+		{"a=b=c1", "", "", false},
 	}
 	for _, c := range cases {
 		got, err := ParseWorkload(c.in)
@@ -456,17 +457,19 @@ func TestParseWorkload(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	good := Options{Workloads: []Workload{wl1}, TTL: time.Hour, Interval: time.Minute, Image: "i"}
+	good := Options{MgmtNamespace: "ns1", Workloads: []Workload{wl1}, TTL: time.Hour, Interval: time.Minute, Image: "i"}
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	bad := map[string]func(o *Options){
-		"dup name":      func(o *Options) { o.Workloads = []Workload{wl1, {Name: "wl1", Cluster: "ns2/wl1"}} },
-		"named mgmt":    func(o *Options) { o.Workloads = []Workload{{Name: "mgmt", Cluster: "ns1/mgmt"}} },
+		"dup name":      func(o *Options) { o.Workloads = []Workload{wl1, {Name: "wl1", Cluster: "other"}} },
+		"named mgmt":    func(o *Options) { o.Workloads = []Workload{{Name: "mgmt", Cluster: "mgmt"}} },
 		"ttl too short": func(o *Options) { o.TTL = 9 * time.Minute },
 		"ttl too long":  func(o *Options) { o.TTL = 8*time.Hour + time.Second },
 		"interval":      func(o *Options) { o.Interval = 0 },
 		"image":         func(o *Options) { o.Image = "" },
+		"namespace":     func(o *Options) { o.MgmtNamespace = "Not_A_Name" },
+		"no namespace":  func(o *Options) { o.MgmtNamespace = "" },
 	}
 	for name, mutate := range bad {
 		o := good
@@ -492,7 +495,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestInstructionsForMgmtOnlyOmitSnapshotCommand(t *testing.T) {
-	got := Instructions("/k", now, nil)
+	got := Instructions("/k", now, "ns1", nil)
 	if strings.Contains(got, "configmaps") || !strings.Contains(got, "mgmt ") || !strings.Contains(got, "2026-10-15 18:10 UTC") {
 		t.Errorf("%s", got)
 	}
@@ -523,7 +526,7 @@ func TestRunWaitsForTerminatingNamespace(t *testing.T) {
 }
 
 func TestInstructionsGiveSnapshotCommandPerWorkload(t *testing.T) {
-	got := Instructions("/k", now, []Workload{wl1, wl2})
+	got := Instructions("/k", now, "ns1", []Workload{wl1, wl2})
 	for _, name := range []string{"wl1", "wl2"} {
 		if !strings.Contains(got, "kubectl --context "+name+" -n kglance get configmaps") || !strings.Contains(got, "> "+name+"-sockets.jsonl") {
 			t.Errorf("missing %s command:\n%s", name, got)
@@ -610,7 +613,7 @@ func TestRunRefusesRenamingARecordedCluster(t *testing.T) {
 	if err := Run(context.Background(), h.options(wl1)); err != nil {
 		t.Fatal(err)
 	}
-	renamed := Workload{Name: "renamed", Cluster: "ns1/wl1"}
+	renamed := Workload{Name: "renamed", Cluster: "wl1"}
 	if err := Run(context.Background(), h.options(renamed)); err == nil || !strings.Contains(err.Error(), "already recorded as wl1") {
 		t.Fatalf("err %v", err)
 	}
@@ -702,18 +705,34 @@ func TestRunConnectsToGivenMgmtContext(t *testing.T) {
 
 func TestRunFailsWithoutKubeconfigSecret(t *testing.T) {
 	h := newHarness(t)
-	err := Run(context.Background(), h.options(wl1, Workload{Name: "missing", Cluster: "ns1/missing"}))
+	err := Run(context.Background(), h.options(wl1, Workload{Name: "missing", Cluster: "missing"}))
 	if err == nil || !strings.Contains(err.Error(), "missing: read kubeconfig Secret ns1/missing-kubeconfig") {
 		t.Fatalf("err %v", err)
 	}
-	if _, err := h.clusters["mgmt"].cs.CoreV1().Namespaces().Get(context.Background(), kube.Namespace, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+	if _, err := h.clusters["mgmt"].cs.CoreV1().ServiceAccounts("ns1").Get(context.Background(), kube.AgentSA, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Error("applied objects before connecting to every cluster")
 	}
 }
 
 func TestInstructionsNameEachWorkloadsCluster(t *testing.T) {
-	got := Instructions("/k", now, []Workload{wl1})
+	got := Instructions("/k", now, "ns1", []Workload{wl1})
 	if !strings.Contains(got, "wl1          workload cluster ns1/wl1:") {
 		t.Errorf("%s", got)
+	}
+}
+
+func TestRunTouchesOnlyMgmtNamespaceOnMgmt(t *testing.T) {
+	h := newHarness(t)
+	m := h.clusters["mgmt"]
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatalf("%v\n%s", err, h.err.String())
+	}
+	for _, a := range m.cs.Actions() {
+		if a.GetNamespace() != "ns1" {
+			t.Errorf("mgmt: %s %s in %q", a.GetVerb(), a.GetResource().Resource, a.GetNamespace())
+		}
+	}
+	if !strings.Contains(h.out.String(), "Cluster API objects and events in namespace ns1") {
+		t.Errorf("instructions:\n%s", h.out.String())
 	}
 }

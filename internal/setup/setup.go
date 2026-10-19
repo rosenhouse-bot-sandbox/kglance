@@ -29,32 +29,29 @@ const (
 // MgmtName is the management cluster's context name in the agent kubeconfig.
 const MgmtName = "mgmt"
 
-// Workload is a Cluster API Cluster and its context name in the agent kubeconfig.
+// Workload is a Cluster API Cluster in the management namespace and its context name in the agent kubeconfig.
 type Workload struct {
-	Name string
-	// Cluster is "namespace/name".
+	Name    string
 	Cluster string
 }
 
-// ParseWorkload parses "[name=]namespace/cluster".
+// ParseWorkload parses "[name=]cluster".
 func ParseWorkload(s string) (Workload, error) {
-	name, ref, found := strings.Cut(s, "=")
+	name, cluster, found := strings.Cut(s, "=")
 	if !found {
-		ref = name
+		cluster = name
 	}
-	_, cluster, err := kube.SplitClusterRef(ref)
-	if !found {
-		name = cluster
+	if len(validation.IsDNS1123Subdomain(name)) > 0 || len(validation.IsDNS1123Subdomain(cluster)) > 0 {
+		return Workload{}, fmt.Errorf("invalid --workload %q: want [name=]cluster", s)
 	}
-	if err != nil || len(validation.IsDNS1123Subdomain(name)) > 0 {
-		return Workload{}, fmt.Errorf("invalid --workload %q: want [name=]namespace/cluster", s)
-	}
-	return Workload{Name: name, Cluster: ref}, nil
+	return Workload{Name: name, Cluster: cluster}, nil
 }
 
 type Options struct {
 	// MgmtContext is the management cluster's admin context; empty means the current context.
-	MgmtContext      string
+	MgmtContext string
+	// MgmtNamespace is the existing management cluster namespace that holds the agent's access and the workload Clusters.
+	MgmtNamespace    string
 	Workloads        []Workload
 	TTL              time.Duration
 	KubeconfigPath   string
@@ -89,15 +86,23 @@ func (o *Options) Validate() error {
 	if o.Image == "" {
 		return errors.New("--image must not be empty")
 	}
+	if o.MgmtNamespace == "" {
+		return errors.New("--mgmt-namespace is required")
+	}
+	if len(validation.IsDNS1123Label(o.MgmtNamespace)) > 0 {
+		return fmt.Errorf("invalid --mgmt-namespace %q", o.MgmtNamespace)
+	}
 	return nil
 }
 
 type cluster struct {
 	Name, Role string
-	conn       *kube.Conn
-	record     state.Cluster
-	token      string
-	expiry     time.Time
+	// namespace holds the agent ServiceAccount.
+	namespace string
+	conn      *kube.Conn
+	record    state.Cluster
+	token     string
+	expiry    time.Time
 }
 
 func Run(ctx context.Context, o Options) error {
@@ -143,7 +148,7 @@ func Run(ctx context.Context, o Options) error {
 
 	collectorErr := reportCollectors(ctx, o, clusters)
 
-	text := Instructions(o.KubeconfigPath, expiry, o.Workloads)
+	text := Instructions(o.KubeconfigPath, expiry, o.MgmtNamespace, o.Workloads)
 	fmt.Fprint(o.Out, "\n"+text)
 	if o.InstructionsPath != "" {
 		if err := os.WriteFile(o.InstructionsPath, []byte(text), 0o644); err != nil {
@@ -186,12 +191,12 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 		return nil, fmt.Errorf("%s: %w", MgmtName, err)
 	}
 	var out []*cluster
-	add := func(name, role, ref string, conn *kube.Conn) error {
+	add := func(name, role, ref, ns string, conn *kube.Conn) error {
 		fp, err := state.Fingerprint(conn.Cluster.CertificateAuthorityData)
 		if err != nil {
 			return err
 		}
-		c := &cluster{Name: name, Role: role, conn: conn, record: state.Cluster{
+		c := &cluster{Name: name, Role: role, namespace: ns, conn: conn, record: state.Cluster{
 			Name: name, Role: role, Context: mgmt.Context, ClusterRef: ref, Server: conn.Cluster.Server, CAFingerprint: fp,
 		}}
 		for _, prev := range out {
@@ -215,20 +220,21 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 		out = append(out, c)
 		return nil
 	}
-	if err := add(MgmtName, state.RoleMgmt, "", mgmt); err != nil {
+	if err := add(MgmtName, state.RoleMgmt, "", o.MgmtNamespace, mgmt); err != nil {
 		return nil, fmt.Errorf("%s: %w", MgmtName, err)
 	}
 	for _, w := range o.Workloads {
 		err := func() error {
-			data, err := kube.ClusterKubeconfig(ctx, mgmt.Client, w.Cluster)
+			ref := o.MgmtNamespace + "/" + w.Cluster
+			data, err := kube.ClusterKubeconfig(ctx, mgmt.Client, ref)
 			if err != nil {
 				return err
 			}
 			conn, err := o.ConnectKubeconfig(data)
 			if err != nil {
-				return fmt.Errorf("kubeconfig of Cluster %s: %w", w.Cluster, err)
+				return fmt.Errorf("kubeconfig of Cluster %s: %w", ref, err)
 			}
-			return add(w.Name, state.RoleWorkload, w.Cluster, conn)
+			return add(w.Name, state.RoleWorkload, ref, kube.Namespace, conn)
 		}()
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", w.Name, err)
@@ -239,11 +245,11 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 
 // install applies c's objects and calls record after each one so that a partial install is recorded.
 func install(ctx context.Context, o Options, c *cluster, record func() error) error {
-	if err := waitNamespaceGoneIfTerminating(ctx, o, c); err != nil {
-		return err
-	}
-	objs := kube.MgmtObjects()
+	objs := kube.MgmtObjects(o.MgmtNamespace)
 	if c.Role == state.RoleWorkload {
+		if err := waitNamespaceGoneIfTerminating(ctx, o, c); err != nil {
+			return err
+		}
 		view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("read ClusterRole view: %w", err)
@@ -310,7 +316,7 @@ func mintTokens(ctx context.Context, o Options, clusters []*cluster) (time.Time,
 	var earliest time.Time
 	seconds := int64(o.TTL / time.Second)
 	for _, c := range clusters {
-		tr, err := c.conn.Client.CoreV1().ServiceAccounts(kube.Namespace).CreateToken(ctx, kube.AgentSA,
+		tr, err := c.conn.Client.CoreV1().ServiceAccounts(c.namespace).CreateToken(ctx, kube.AgentSA,
 			&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
 		if err != nil {
 			return time.Time{}, fmt.Errorf("%s: request token: %w", c.Name, err)

@@ -81,27 +81,25 @@ func TestAgentViewClusterRoleAddsEvents(t *testing.T) {
 	}
 }
 
-func TestAgentCAPIClusterRoleIsReadOnlyCAPIWithoutSecrets(t *testing.T) {
-	cr := AgentCAPIClusterRole()
+func TestAgentCAPIRoleIsReadOnlyCAPIWithoutSecrets(t *testing.T) {
+	r := AgentCAPIRole("team")
+	if r.Namespace != "team" || r.Name != AgentCAPIRoleName {
+		t.Errorf("%s/%s", r.Namespace, r.Name)
+	}
 	for _, g := range []string{"cluster.x-k8s.io", "infrastructure.cluster.x-k8s.io", "controlplane.cluster.x-k8s.io", "bootstrap.cluster.x-k8s.io", "addons.cluster.x-k8s.io", "ipam.cluster.x-k8s.io", "runtime.cluster.x-k8s.io"} {
-		if !allows(cr.Rules, g, "anything", "list") {
+		if !allows(r.Rules, g, "anything", "list") {
 			t.Errorf("missing group %s", g)
 		}
 	}
-	for _, res := range []string{"namespaces", "events", "nodes"} {
-		if !allows(cr.Rules, "", res, "list") {
-			t.Errorf("missing core %s", res)
-		}
+	if !allows(r.Rules, "", "events", "list") || !allows(r.Rules, "events.k8s.io", "events", "watch") {
+		t.Error("missing events")
 	}
-	if !allows(cr.Rules, "events.k8s.io", "events", "watch") {
-		t.Error("missing events.k8s.io")
-	}
-	if allows(cr.Rules, "", "secrets", "get") || allows(cr.Rules, "", "anything", "get") {
+	if allows(r.Rules, "", "secrets", "get") || allows(r.Rules, "", "anything", "get") {
 		t.Error("core wildcard or secrets granted")
 	}
-	for _, r := range cr.Rules {
-		if !slices.Equal(r.Verbs, []string{"get", "list", "watch"}) {
-			t.Errorf("verbs %v", r.Verbs)
+	for _, rule := range r.Rules {
+		if !slices.Equal(rule.Verbs, []string{"get", "list", "watch"}) {
+			t.Errorf("verbs %v", rule.Verbs)
 		}
 	}
 }
@@ -131,25 +129,20 @@ func TestAgentSnapshotRoleReadsConfigMaps(t *testing.T) {
 
 func TestBindingsTargetServiceAccountInNamespace(t *testing.T) {
 	crb := ClusterRoleBinding("role-x", "sa-y")
-	rb := RoleBinding("role-z", "sa-w")
+	rb := RoleBinding("role-z", "ns-v", "sa-w")
 	if crb.Name != "role-x" || crb.RoleRef.Kind != "ClusterRole" || crb.RoleRef.Name != "role-x" ||
 		crb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: "sa-y", Namespace: Namespace}) {
 		t.Errorf("crb %+v", crb)
 	}
-	if rb.Namespace != Namespace || rb.RoleRef.Kind != "Role" || rb.RoleRef.Name != "role-z" || rb.Subjects[0].Name != "sa-w" {
+	if rb.Namespace != "ns-v" || rb.Subjects[0].Namespace != "ns-v" || rb.RoleRef.Kind != "Role" || rb.RoleRef.Name != "role-z" || rb.Subjects[0].Name != "sa-w" {
 		t.Errorf("rb %+v", rb)
 	}
 }
 
-func TestOnlyWorkloadNamespaceAllowsPrivilegedPods(t *testing.T) {
-	const psa = "pod-security.kubernetes.io/enforce"
-	wl := WorkloadObjects(nil, DaemonSetOptions{Image: "i", Interval: time.Minute})[0].(*corev1.Namespace)
-	if wl.Name != Namespace || wl.Labels[psa] != "privileged" {
-		t.Errorf("workload %+v", wl)
-	}
-	mgmt := MgmtObjects()[0].(*corev1.Namespace)
-	if _, ok := mgmt.Labels[psa]; mgmt.Name != Namespace || ok {
-		t.Errorf("mgmt %+v", mgmt)
+func TestWorkloadNamespaceAllowsPrivilegedPods(t *testing.T) {
+	ns := NamespaceObject()
+	if ns.Name != Namespace || ns.Labels["pod-security.kubernetes.io/enforce"] != "privileged" {
+		t.Errorf("%+v", ns)
 	}
 }
 
@@ -215,7 +208,7 @@ func TestDaemonSetContract(t *testing.T) {
 
 func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 	sets := map[string][]Object{
-		"mgmt":     MgmtObjects(),
+		"mgmt":     MgmtObjects("team"),
 		"workload": WorkloadObjects(nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}),
 	}
 	for name, objs := range sets {
@@ -235,7 +228,7 @@ func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 		}
 		return ks
 	}
-	wantMgmt := []string{"Namespace/kglance", "ServiceAccount/kglance-agent", "ClusterRole/kglance-agent-capi", "ClusterRoleBinding/kglance-agent-capi"}
+	wantMgmt := []string{"ServiceAccount/kglance-agent", "Role/kglance-agent-capi", "RoleBinding/kglance-agent-capi"}
 	if got := kinds(sets["mgmt"]); !slices.Equal(got, wantMgmt) {
 		t.Errorf("mgmt %v", got)
 	}
@@ -262,5 +255,17 @@ func TestDaemonSetPullsLatestOrUntaggedImagesAlways(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: got %s want %s", img, got, want)
 		}
+	}
+}
+
+func TestMgmtObjectsAreInTheGivenNamespace(t *testing.T) {
+	objs := MgmtObjects("team")
+	for _, o := range objs {
+		if o.GetNamespace() != "team" {
+			t.Errorf("%T %s in %q", o, o.GetName(), o.GetNamespace())
+		}
+	}
+	if rb := objs[2].(*rbacv1.RoleBinding); rb.RoleRef.Name != AgentCAPIRoleName || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: AgentSA, Namespace: "team"}) {
+		t.Errorf("binding %+v", rb)
 	}
 }

@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	AgentViewRole = "kglance-agent-view"
-	AgentCAPIRole = "kglance-agent-capi"
-	AgentRole     = "kglance-agent"
-	collectorRole = "kglance-collector"
+	AgentViewRole     = "kglance-agent-view"
+	AgentCAPIRoleName = "kglance-agent-capi"
+	AgentRole         = "kglance-agent"
+	collectorRole     = "kglance-collector"
 )
 
 type Object interface {
@@ -47,16 +47,15 @@ func meta(kind, apiVersion, namespace, name string) (metav1.TypeMeta, metav1.Obj
 		metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{ManagedByLabel: ManagedByValue}}
 }
 
-func NamespaceObject(privileged bool) *corev1.Namespace {
+// NamespaceObject is the workload namespace, which allows the privileged collector.
+func NamespaceObject() *corev1.Namespace {
 	tm, om := meta("Namespace", "v1", "", Namespace)
-	if privileged {
-		om.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
-	}
+	om.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
 	return &corev1.Namespace{TypeMeta: tm, ObjectMeta: om}
 }
 
-func ServiceAccount(name string) *corev1.ServiceAccount {
-	tm, om := meta("ServiceAccount", "v1", Namespace, name)
+func ServiceAccount(ns, name string) *corev1.ServiceAccount {
+	tm, om := meta("ServiceAccount", "v1", ns, name)
 	return &corev1.ServiceAccount{TypeMeta: tm, ObjectMeta: om}
 }
 
@@ -65,26 +64,26 @@ func clusterRole(name string, rules []rbacv1.PolicyRule) *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{TypeMeta: tm, ObjectMeta: om, Rules: rules}
 }
 
-func role(name string, rules []rbacv1.PolicyRule) *rbacv1.Role {
-	tm, om := meta("Role", "rbac.authorization.k8s.io/v1", Namespace, name)
+func role(ns, name string, rules []rbacv1.PolicyRule) *rbacv1.Role {
+	tm, om := meta("Role", "rbac.authorization.k8s.io/v1", ns, name)
 	return &rbacv1.Role{TypeMeta: tm, ObjectMeta: om, Rules: rules}
 }
 
-func saSubject(sa string) []rbacv1.Subject {
-	return []rbacv1.Subject{{Kind: "ServiceAccount", Name: sa, Namespace: Namespace}}
+func saSubject(ns, sa string) []rbacv1.Subject {
+	return []rbacv1.Subject{{Kind: "ServiceAccount", Name: sa, Namespace: ns}}
 }
 
 // ClusterRoleBinding binds the ClusterRole of the same name to a ServiceAccount in the kglance namespace.
 func ClusterRoleBinding(name, sa string) *rbacv1.ClusterRoleBinding {
 	tm, om := meta("ClusterRoleBinding", "rbac.authorization.k8s.io/v1", "", name)
-	return &rbacv1.ClusterRoleBinding{TypeMeta: tm, ObjectMeta: om, Subjects: saSubject(sa),
+	return &rbacv1.ClusterRoleBinding{TypeMeta: tm, ObjectMeta: om, Subjects: saSubject(Namespace, sa),
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: name}}
 }
 
-// RoleBinding binds the Role of the same name to a ServiceAccount in the kglance namespace.
-func RoleBinding(name, sa string) *rbacv1.RoleBinding {
-	tm, om := meta("RoleBinding", "rbac.authorization.k8s.io/v1", Namespace, name)
-	return &rbacv1.RoleBinding{TypeMeta: tm, ObjectMeta: om, Subjects: saSubject(sa),
+// RoleBinding binds the Role of the same name to ServiceAccount ns/sa.
+func RoleBinding(name, ns, sa string) *rbacv1.RoleBinding {
+	tm, om := meta("RoleBinding", "rbac.authorization.k8s.io/v1", ns, name)
+	return &rbacv1.RoleBinding{TypeMeta: tm, ObjectMeta: om, Subjects: saSubject(ns, sa),
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name}}
 }
 
@@ -124,16 +123,12 @@ func AgentViewClusterRole(viewRules []rbacv1.PolicyRule) *rbacv1.ClusterRole {
 	return clusterRole(AgentViewRole, append(FilterViewRules(viewRules), eventRules...))
 }
 
-func AgentCAPIClusterRole() *rbacv1.ClusterRole {
-	rules := []rbacv1.PolicyRule{
-		{APIGroups: capiGroups, Resources: []string{"*"}, Verbs: readVerbs},
-		{APIGroups: []string{""}, Resources: []string{"namespaces", "nodes"}, Verbs: readVerbs},
-	}
-	return clusterRole(AgentCAPIRole, append(rules, eventRules...))
+func AgentCAPIRole(ns string) *rbacv1.Role {
+	return role(ns, AgentCAPIRoleName, append([]rbacv1.PolicyRule{{APIGroups: capiGroups, Resources: []string{"*"}, Verbs: readVerbs}}, eventRules...))
 }
 
 func AgentSnapshotRole() *rbacv1.Role {
-	return role(AgentRole, []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: readVerbs}})
+	return role(Namespace, AgentRole, []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: readVerbs}})
 }
 
 func CollectorClusterRole() *rbacv1.ClusterRole {
@@ -144,7 +139,7 @@ func CollectorClusterRole() *rbacv1.ClusterRole {
 }
 
 func CollectorRole() *rbacv1.Role {
-	return role(collectorRole, []rbacv1.PolicyRule{
+	return role(Namespace, collectorRole, []rbacv1.PolicyRule{
 		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "create", "update", "patch"}},
 	})
 }
@@ -212,28 +207,28 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 	}}
 }
 
-func MgmtObjects() []Object {
+// MgmtObjects grants reads in the existing namespace ns only.
+func MgmtObjects(ns string) []Object {
 	return []Object{
-		NamespaceObject(false),
-		ServiceAccount(AgentSA),
-		AgentCAPIClusterRole(),
-		ClusterRoleBinding(AgentCAPIRole, AgentSA),
+		ServiceAccount(ns, AgentSA),
+		AgentCAPIRole(ns),
+		RoleBinding(AgentCAPIRoleName, ns, AgentSA),
 	}
 }
 
 func WorkloadObjects(viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Object {
 	return []Object{
-		NamespaceObject(true),
-		ServiceAccount(AgentSA),
-		ServiceAccount(CollectorSA),
+		NamespaceObject(),
+		ServiceAccount(Namespace, AgentSA),
+		ServiceAccount(Namespace, CollectorSA),
 		AgentViewClusterRole(viewRules),
 		ClusterRoleBinding(AgentViewRole, AgentSA),
 		AgentSnapshotRole(),
-		RoleBinding(AgentRole, AgentSA),
+		RoleBinding(AgentRole, Namespace, AgentSA),
 		CollectorClusterRole(),
 		ClusterRoleBinding(collectorRole, CollectorSA),
 		CollectorRole(),
-		RoleBinding(collectorRole, CollectorSA),
+		RoleBinding(collectorRole, Namespace, CollectorSA),
 		DaemonSet(ds),
 	}
 }
