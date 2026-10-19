@@ -240,8 +240,8 @@ func parseTeardown(args []string, errOut io.Writer) (teardown.Options, string, e
 	if o.ByLabel && set["state"] {
 		err = errors.New("--state cannot be combined with --context, --workload or --mgmt-namespace")
 	}
-	if o.ByLabel && o.MgmtNamespace == "" {
-		err = errors.New("--mgmt-namespace is required without a state file")
+	if o.ByLabel && len(validation.IsDNS1123Label(o.MgmtNamespace)) > 0 {
+		err = fmt.Errorf("without a state file, --mgmt-namespace must name a namespace, not %q", o.MgmtNamespace)
 	}
 	for _, w := range workloads {
 		if len(validation.IsDNS1123Subdomain(w)) > 0 {

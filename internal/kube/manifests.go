@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	AgentViewRole     = "kglance-agent-view"
-	AgentCAPIRoleName = "kglance-agent-capi"
-	AgentRole         = "kglance-agent"
-	collectorRole     = "kglance-collector"
+	AgentViewRole = "kglance-agent-view"
+	AgentCAPIRole = "kglance-agent-capi"
+	AgentRole     = "kglance-agent"
+	collectorRole = "kglance-collector"
 )
 
 type Object interface {
@@ -123,8 +123,8 @@ func AgentViewClusterRole(viewRules []rbacv1.PolicyRule) *rbacv1.ClusterRole {
 	return clusterRole(AgentViewRole, append(FilterViewRules(viewRules), eventRules...))
 }
 
-func AgentCAPIRole(ns string) *rbacv1.Role {
-	return role(ns, AgentCAPIRoleName, append([]rbacv1.PolicyRule{{APIGroups: capiGroups, Resources: []string{"*"}, Verbs: readVerbs}}, eventRules...))
+func CAPIReadRole(ns string) *rbacv1.Role {
+	return role(ns, AgentCAPIRole, append([]rbacv1.PolicyRule{{APIGroups: capiGroups, Resources: []string{"*"}, Verbs: readVerbs}}, eventRules...))
 }
 
 func AgentSnapshotRole() *rbacv1.Role {
@@ -211,8 +211,8 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 func MgmtObjects(ns string) []Object {
 	return []Object{
 		ServiceAccount(ns, AgentSA),
-		AgentCAPIRole(ns),
-		RoleBinding(AgentCAPIRoleName, ns, AgentSA),
+		CAPIReadRole(ns),
+		RoleBinding(AgentCAPIRole, ns, AgentSA),
 	}
 }
 

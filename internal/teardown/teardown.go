@@ -221,21 +221,22 @@ func removeLabelled(ctx context.Context, conn *kube.Conn, ns string, clusterScop
 	cs := conn.Client
 	sel := metav1.ListOptions{LabelSelector: kube.ManagedByLabel + "=" + kube.ManagedByValue}
 	listers := []struct {
-		kind string
-		list func() (runtime.Object, error)
+		kind          string
+		clusterScoped bool
+		list          func() (runtime.Object, error)
 	}{
-		{"DaemonSet", func() (runtime.Object, error) { return cs.AppsV1().DaemonSets(ns).List(ctx, sel) }},
-		{"RoleBinding", func() (runtime.Object, error) { return cs.RbacV1().RoleBindings(ns).List(ctx, sel) }},
-		{"Role", func() (runtime.Object, error) { return cs.RbacV1().Roles(ns).List(ctx, sel) }},
-		{"ServiceAccount", func() (runtime.Object, error) { return cs.CoreV1().ServiceAccounts(ns).List(ctx, sel) }},
-		{"ClusterRoleBinding", func() (runtime.Object, error) { return cs.RbacV1().ClusterRoleBindings().List(ctx, sel) }},
-		{"ClusterRole", func() (runtime.Object, error) { return cs.RbacV1().ClusterRoles().List(ctx, sel) }},
-		{"Namespace", func() (runtime.Object, error) { return cs.CoreV1().Namespaces().List(ctx, sel) }},
-	}
-	if !clusterScoped {
-		listers = listers[:4]
+		{"DaemonSet", false, func() (runtime.Object, error) { return cs.AppsV1().DaemonSets(ns).List(ctx, sel) }},
+		{"RoleBinding", false, func() (runtime.Object, error) { return cs.RbacV1().RoleBindings(ns).List(ctx, sel) }},
+		{"Role", false, func() (runtime.Object, error) { return cs.RbacV1().Roles(ns).List(ctx, sel) }},
+		{"ServiceAccount", false, func() (runtime.Object, error) { return cs.CoreV1().ServiceAccounts(ns).List(ctx, sel) }},
+		{"ClusterRoleBinding", true, func() (runtime.Object, error) { return cs.RbacV1().ClusterRoleBindings().List(ctx, sel) }},
+		{"ClusterRole", true, func() (runtime.Object, error) { return cs.RbacV1().ClusterRoles().List(ctx, sel) }},
+		{"Namespace", true, func() (runtime.Object, error) { return cs.CoreV1().Namespaces().List(ctx, sel) }},
 	}
 	for _, l := range listers {
+		if l.clusterScoped && !clusterScoped {
+			continue
+		}
 		list, err := l.list()
 		if err != nil {
 			return err

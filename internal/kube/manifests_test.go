@@ -82,8 +82,8 @@ func TestAgentViewClusterRoleAddsEvents(t *testing.T) {
 }
 
 func TestAgentCAPIRoleIsReadOnlyCAPIWithoutSecrets(t *testing.T) {
-	r := AgentCAPIRole("team")
-	if r.Namespace != "team" || r.Name != AgentCAPIRoleName {
+	r := CAPIReadRole("team")
+	if r.Namespace != "team" || r.Name != AgentCAPIRole {
 		t.Errorf("%s/%s", r.Namespace, r.Name)
 	}
 	for _, g := range []string{"cluster.x-k8s.io", "infrastructure.cluster.x-k8s.io", "controlplane.cluster.x-k8s.io", "bootstrap.cluster.x-k8s.io", "addons.cluster.x-k8s.io", "ipam.cluster.x-k8s.io", "runtime.cluster.x-k8s.io"} {
@@ -265,7 +265,7 @@ func TestMgmtObjectsAreInTheGivenNamespace(t *testing.T) {
 			t.Errorf("%T %s in %q", o, o.GetName(), o.GetNamespace())
 		}
 	}
-	if rb := objs[2].(*rbacv1.RoleBinding); rb.RoleRef.Name != AgentCAPIRoleName || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: AgentSA, Namespace: "team"}) {
+	if rb := objs[2].(*rbacv1.RoleBinding); rb.RoleRef.Name != AgentCAPIRole || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: AgentSA, Namespace: "team"}) {
 		t.Errorf("binding %+v", rb)
 	}
 }

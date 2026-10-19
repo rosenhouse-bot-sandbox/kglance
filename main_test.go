@@ -76,7 +76,7 @@ func TestParseTeardown(t *testing.T) {
 	if err != nil || !o.ByLabel || o.MgmtContext != "a" || o.MgmtNamespace != "ns1" || !slices.Equal(o.Workloads, []string{"b", "c"}) || kc != "/k" || filepath.Base(o.StatePath) != "kglance.state.json" {
 		t.Fatalf("%+v %v", o, err)
 	}
-	if _, _, err = parseTeardown([]string{"--workload", "b"}, io.Discard); err == nil || !strings.Contains(err.Error(), "--mgmt-namespace is required") {
+	if _, _, err = parseTeardown([]string{"--workload", "b"}, io.Discard); err == nil || !strings.Contains(err.Error(), "--mgmt-namespace must name a namespace") {
 		t.Fatalf("without --mgmt-namespace: %v", err)
 	}
 	o, _, err = parseTeardown([]string{"--mgmt-namespace", "team"}, io.Discard)
@@ -86,6 +86,9 @@ func TestParseTeardown(t *testing.T) {
 	o, _, err = parseTeardown([]string{"--state", "s.json"}, io.Discard)
 	if err != nil || filepath.Base(o.StatePath) != "s.json" || o.ByLabel {
 		t.Fatalf("%+v %v", o, err)
+	}
+	if _, _, err = parseTeardown([]string{"--mgmt-namespace", "Bad_NS"}, io.Discard); err == nil {
+		t.Fatal("bad --mgmt-namespace: expected error")
 	}
 	for _, bad := range []string{"ns1/b", "c=c"} {
 		if _, _, err := parseTeardown([]string{"--mgmt-namespace", "ns1", "--workload", bad}, io.Discard); err == nil {

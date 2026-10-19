@@ -291,8 +291,8 @@ func TestRunByLabelDeletesLabelledObjectsOnly(t *testing.T) {
 	}
 	ctx := context.Background()
 	_, saErr := h.mgmt.CoreV1().ServiceAccounts("ns1").Get(ctx, kube.AgentSA, metav1.GetOptions{})
-	_, rErr := h.mgmt.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRoleName, metav1.GetOptions{})
-	_, rbErr := h.mgmt.RbacV1().RoleBindings("ns1").Get(ctx, kube.AgentCAPIRoleName, metav1.GetOptions{})
+	_, rErr := h.mgmt.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRole, metav1.GetOptions{})
+	_, rbErr := h.mgmt.RbacV1().RoleBindings("ns1").Get(ctx, kube.AgentCAPIRole, metav1.GetOptions{})
 	for _, err := range []error{saErr, rErr, rbErr} {
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("mgmt: %v", err)

@@ -219,7 +219,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	ctx := context.Background()
 
 	m, w := h.clusters["mgmt"].cs, h.clusters["wl1"].cs
-	if _, err := m.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRoleName, metav1.GetOptions{}); err != nil {
+	if _, err := m.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRole, metav1.GetOptions{}); err != nil {
 		t.Error("mgmt: capi role missing")
 	}
 	if _, err := m.AppsV1().DaemonSets(kube.Namespace).Get(ctx, kube.CollectorDS, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -718,6 +718,19 @@ func TestInstructionsNameEachWorkloadsCluster(t *testing.T) {
 	got := Instructions("/k", now, "ns1", []Workload{wl1})
 	if !strings.Contains(got, "wl1          workload cluster ns1/wl1:") {
 		t.Errorf("%s", got)
+	}
+}
+
+func TestRunRefusesMgmtObjectsRecordedOutsideTheNamespace(t *testing.T) {
+	h := newHarness(t)
+	o := h.options()
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	o.MgmtNamespace = "other"
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "mgmt: recorded ServiceAccount ns1/kglance-agent") || !strings.Contains(err.Error(), "run kglance teardown first") {
+		t.Fatalf("err %v", err)
 	}
 }
 

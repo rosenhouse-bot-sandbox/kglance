@@ -223,6 +223,11 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 	if err := add(MgmtName, state.RoleMgmt, "", o.MgmtNamespace, mgmt); err != nil {
 		return nil, fmt.Errorf("%s: %w", MgmtName, err)
 	}
+	for _, rec := range out[0].record.Objects {
+		if !slices.ContainsFunc(kube.MgmtObjects(o.MgmtNamespace), func(obj kube.Object) bool { return recordOf(obj) == rec }) {
+			return nil, fmt.Errorf("%s: recorded %s %s/%s outside --mgmt-namespace %s; run kglance teardown first", MgmtName, rec.Kind, rec.Namespace, rec.Name, o.MgmtNamespace)
+		}
+	}
 	for _, w := range o.Workloads {
 		err := func() error {
 			ref := o.MgmtNamespace + "/" + w.Cluster
@@ -268,9 +273,7 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 		if err := kube.Apply(ctx, c.conn.Client, obj); err != nil {
 			return err
 		}
-		gvk := obj.GetObjectKind().GroupVersionKind()
-		applied := state.Object{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
-		if !slices.Contains(c.record.Objects, applied) {
+		if applied := recordOf(obj); !slices.Contains(c.record.Objects, applied) {
 			c.record.Objects = append(c.record.Objects, applied)
 		}
 		if err := record(); err != nil {
@@ -278,6 +281,11 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 		}
 	}
 	return nil
+}
+
+func recordOf(obj kube.Object) state.Object {
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	return state.Object{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
 }
 
 const terminatingTimeout = 2 * time.Minute
