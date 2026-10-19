@@ -282,6 +282,7 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 		if err := record(); err != nil {
 			return err
 		}
+		fmt.Fprintf(o.Out, "%s: apply %s: ok\n", c.Name, describe(obj))
 	}
 	return nil
 }
@@ -343,9 +344,11 @@ func mintTokens(ctx context.Context, o Options, clusters []*cluster) (time.Time,
 	for _, c := range clusters {
 		tr, err := c.conn.Client.CoreV1().ServiceAccounts(c.namespace).CreateToken(ctx, kube.AgentSA,
 			&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
+		step := "request token for " + c.namespace + "/" + kube.AgentSA
 		if err != nil {
-			return time.Time{}, fmt.Errorf("%s: request token: %w", c.Name, err)
+			return time.Time{}, fmt.Errorf("%s: %s: %w", c.Name, step, err)
 		}
+		fmt.Fprintf(o.Out, "%s: %s: ok\n", c.Name, step)
 		c.token, c.expiry = tr.Status.Token, tr.Status.ExpirationTimestamp.Time
 		if c.expiry.Before(o.Now().Add(o.TTL - time.Minute)) {
 			fmt.Fprintf(o.Err, "warning: %s: token expires at %s; the API server shortened the requested --ttl %v\n", c.Name, clock(c.expiry), o.TTL)

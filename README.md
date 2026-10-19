@@ -20,13 +20,16 @@ With your admin context on the management cluster, run `setup`, naming the names
 
 ```bash
 $ kglance setup --mgmt-namespace my-namespace --workload wl1 -o agent.kubeconfig --instructions agent.md
+mgmt: apply ServiceAccount my-namespace/kglance-agent: ok
+...
+wl1: request token for kglance/kglance-agent: ok
 wrote /home/me/agent.kubeconfig (contexts: mgmt, wl1; expires 19:10 UTC)
 wrote /home/me/kglance.state.json
 socket collector running on 4 nodes (1 control-plane, 3 worker)
 ...
 ```
 
-Add `--dry-run` to list each change and check your permissions without making any.
+Add `--dry-run` to check each step against your permissions without changing anything.
 
 kglance reaches each workload cluster through the kubeconfig Secret that Cluster API keeps for it, so you don't need a context for it.
 Give the agent `agent.kubeconfig` and `agent.md`.

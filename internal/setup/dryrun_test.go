@@ -222,3 +222,23 @@ func TestDryRunFailsWhenAccessReviewsFail(t *testing.T) {
 		t.Errorf("got %v want %s", err, want)
 	}
 }
+
+func TestRunPrintsTheStepsDryRunChecks(t *testing.T) {
+	dry := newHarness(t)
+	o := dry.options(wl1)
+	o.DryRun = true
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t)
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(dry.out.String(), "\n") {
+		if strings.Contains(line, ": apply ") || strings.Contains(line, ": request token ") {
+			if !strings.Contains(h.out.String(), line+"\n") {
+				t.Errorf("missing %q in:\n%s", line, h.out.String())
+			}
+		}
+	}
+}
