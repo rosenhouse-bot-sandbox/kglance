@@ -15,7 +15,7 @@ import (
 
 const (
 	AgentViewRole = "kglance-agent-view"
-	AgentCAPIRole = "kglance-agent-capi"
+	AgentMgmtRole = "kglance-agent-capi"
 	AgentRole     = "kglance-agent"
 	collectorRole = "kglance-collector"
 )
@@ -27,7 +27,7 @@ type Object interface {
 
 var readVerbs = []string{"get", "list", "watch"}
 
-var capiGroups = []string{
+var mgmtCRDGroups = []string{
 	"cluster.x-k8s.io",
 	"infrastructure.cluster.x-k8s.io",
 	"controlplane.cluster.x-k8s.io",
@@ -35,6 +35,7 @@ var capiGroups = []string{
 	"addons.cluster.x-k8s.io",
 	"ipam.cluster.x-k8s.io",
 	"runtime.cluster.x-k8s.io",
+	"vmoperator.vmware.com",
 }
 
 var eventRules = []rbacv1.PolicyRule{
@@ -123,8 +124,12 @@ func AgentViewClusterRole(viewRules []rbacv1.PolicyRule) *rbacv1.ClusterRole {
 	return clusterRole(AgentViewRole, append(FilterViewRules(viewRules), eventRules...))
 }
 
-func CAPIReadRole(ns string) *rbacv1.Role {
-	return role(ns, AgentCAPIRole, append([]rbacv1.PolicyRule{{APIGroups: capiGroups, Resources: []string{"*"}, Verbs: readVerbs}}, eventRules...))
+func MgmtReadRole(ns string) *rbacv1.Role {
+	return role(ns, AgentMgmtRole, append([]rbacv1.PolicyRule{
+		{APIGroups: mgmtCRDGroups, Resources: []string{"*"}, Verbs: readVerbs},
+		{APIGroups: []string{""}, Resources: []string{"pods", "services"}, Verbs: readVerbs},
+		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: readVerbs},
+	}, eventRules...))
 }
 
 func AgentSnapshotRole() *rbacv1.Role {
@@ -211,8 +216,8 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 func MgmtObjects(ns string) []Object {
 	return []Object{
 		ServiceAccount(ns, AgentSA),
-		CAPIReadRole(ns),
-		RoleBinding(AgentCAPIRole, ns, AgentSA),
+		MgmtReadRole(ns),
+		RoleBinding(AgentMgmtRole, ns, AgentSA),
 	}
 }
 

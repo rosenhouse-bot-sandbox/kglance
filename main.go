@@ -41,8 +41,9 @@ workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
 
 --context, or the current context by default, names the Cluster API management cluster.
-Setup changes only the existing namespace --mgmt-namespace on it, and the agent can read
-only Cluster API objects and events there. Each --workload names a Cluster in that namespace.
+Setup changes only the existing namespace --mgmt-namespace on it. There the agent can read
+only Cluster API and VM Operator objects, pods, services, deployments and events.
+Each --workload names a Cluster in that namespace.
 Setup reaches that cluster with the admin kubeconfig in the Cluster's <cluster>-kubeconfig Secret.
 The agent kubeconfig has a context "mgmt" and one context per workload, named after the
 Cluster unless name= is given.
