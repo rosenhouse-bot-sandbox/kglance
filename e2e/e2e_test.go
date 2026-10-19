@@ -29,7 +29,6 @@ import (
 const (
 	listenerNS   = "kglance-e2e"
 	listenerPort = "18080"
-	workloadRef  = listenerNS + "/wl1"
 )
 
 var rowFields = []string{"cluster", "node", "role", "ts", "netns", "proto", "local", "peer", "state", "pid", "process", "pod", "container"}
@@ -44,11 +43,11 @@ type env struct {
 func TestSetupAgentAccessTeardown(t *testing.T) {
 	e := newEnv(t)
 	e.putKubeconfigSecret()
-	e.kglance("teardown", "--context", e.mgmtCtx, "--workload", workloadRef)
+	e.kglance("teardown", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1")
 	t.Cleanup(func() {
 		if t.Failed() {
 			os.Remove(filepath.Join(e.dir, "kglance.state.json"))
-			e.kglance("teardown", "--context", e.mgmtCtx, "--workload", workloadRef)
+			e.kglance("teardown", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1")
 		}
 		for _, ctx := range []string{e.mgmtCtx, e.wlCtx} {
 			e.admin(ctx, "delete", "namespace", listenerNS, "--ignore-not-found", "--wait=false")
@@ -56,7 +55,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 	})
 	e.startListener()
 
-	out := e.mustKglance("setup", "--context", e.mgmtCtx, "--workload", workloadRef,
+	out := e.mustKglance("setup", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1",
 		"--ttl", "1h", "-o", "agent.kubeconfig", "--image", e.image, "--interval", "5s")
 	nodes := e.nodes()
 	cp := 0
@@ -78,9 +77,11 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 	firstKC := e.copyFile(agentKC)
 
 	t.Run("mgmt access", func(t *testing.T) {
-		e.allowed(t, agentKC, "mgmt", "get", "clusters.cluster.x-k8s.io", "-A")
-		e.allowed(t, agentKC, "mgmt", "get", "machines.cluster.x-k8s.io", "-A")
-		e.forbidden(t, agentKC, "mgmt", "get", "secrets", "-A")
+		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "clusters.cluster.x-k8s.io")
+		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "machines.cluster.x-k8s.io")
+		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "events")
+		e.forbidden(t, agentKC, "mgmt", "get", "clusters.cluster.x-k8s.io", "-A")
+		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "secrets")
 		e.forbidden(t, agentKC, "mgmt", "-n", "kube-system", "get", "secret", "foo")
 	})
 
@@ -116,7 +117,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 
 	t.Run("setup rerun from the current context", func(t *testing.T) {
 		gen := e.dsGeneration()
-		e.mustKglance("setup", "--kubeconfig", e.adminKubeconfigOnMgmt(), "--workload", workloadRef,
+		e.mustKglance("setup", "--kubeconfig", e.adminKubeconfigOnMgmt(), "--mgmt-namespace", listenerNS, "--workload", "wl1",
 			"--ttl", "1h", "-o", "agent.kubeconfig", "--image", e.image, "--interval", "5s")
 		if got := e.dsGeneration(); got != gen {
 			t.Errorf("DaemonSet generation %s -> %s", gen, got)
@@ -146,7 +147,10 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 					t.Errorf("%s: leftover %s:\n%s", ctx, kind, out)
 				}
 			}
-			e.waitGone(ctx, "namespace", "kglance")
+		}
+		e.waitGone(e.wlCtx, "namespace", "kglance")
+		if out := e.admin(e.mgmtCtx, "-n", listenerNS, "get", "serviceaccounts,roles,rolebindings", "-l", "app.kubernetes.io/managed-by=kglance", "-o", "name"); out != "" {
+			t.Errorf("mgmt: leftover objects:\n%s", out)
 		}
 		for _, kc := range []string{firstKC, secondKC} {
 			for _, ctx := range []string{"mgmt", "wl1"} {

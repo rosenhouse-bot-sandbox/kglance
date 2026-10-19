@@ -27,8 +27,9 @@ type Options struct {
 	// ByLabel removes labelled objects from MgmtContext and Workloads instead of reading the state file.
 	ByLabel bool
 	// MgmtContext is the management cluster's admin context; empty means the current context.
-	MgmtContext string
-	// Workloads are Cluster API "namespace/name" references.
+	MgmtContext   string
+	MgmtNamespace string
+	// Workloads are names of Cluster API Clusters in MgmtNamespace.
 	Workloads []string
 	Connect   func(context string) (*kube.Conn, error)
 	// ConnectKubeconfig connects with a kubeconfig read from a Cluster's Secret.
@@ -66,7 +67,7 @@ func (o Options) connectCluster(ctx context.Context, mgmt *kube.Conn, ref string
 
 func byState(ctx context.Context, o Options) error {
 	if _, err := os.Stat(o.StatePath); errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%s not found; use --state, or --context and --workload", o.StatePath)
+		return fmt.Errorf("%s not found; use --state, or the --context, --workload and --mgmt-namespace flags that setup used", o.StatePath)
 	}
 	st, err := state.Load(o.StatePath)
 	if err != nil {
@@ -183,17 +184,17 @@ func removeRecorded(ctx context.Context, o Options, c state.Cluster) (skipped []
 
 func byLabel(ctx context.Context, o Options) error {
 	if _, err := os.Stat(o.StatePath); err == nil {
-		return fmt.Errorf("%s exists; run kglance teardown without --context or --workload", o.StatePath)
+		return fmt.Errorf("%s exists; run kglance teardown without --context, --workload or --mgmt-namespace", o.StatePath)
 	}
 	mgmt, err := o.Connect(o.MgmtContext)
 	if err != nil {
 		return err
 	}
 	var failed []string
-	remove := func(name string, conn *kube.Conn, err error) {
+	remove := func(name string, conn *kube.Conn, ns string, clusterScoped bool, err error) {
 		fmt.Fprintf(o.Out, "removing kglance from %s ... ", name)
 		if err == nil {
-			err = removeLabelled(ctx, conn)
+			err = removeLabelled(ctx, conn, ns, clusterScoped)
 		}
 		if err != nil {
 			fmt.Fprintln(o.Out, "failed")
@@ -203,10 +204,11 @@ func byLabel(ctx context.Context, o Options) error {
 		}
 		fmt.Fprintln(o.Out, "done")
 	}
-	remove("context "+mgmt.Context, mgmt, nil)
-	for _, ref := range o.Workloads {
+	remove("context "+mgmt.Context, mgmt, o.MgmtNamespace, false, nil)
+	for _, w := range o.Workloads {
+		ref := o.MgmtNamespace + "/" + w
 		conn, err := o.connectCluster(ctx, mgmt, ref)
-		remove("Cluster "+ref, conn, err)
+		remove("Cluster "+ref, conn, kube.Namespace, true, err)
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("teardown failed on %s", strings.Join(failed, ", "))
@@ -214,23 +216,27 @@ func byLabel(ctx context.Context, o Options) error {
 	return nil
 }
 
-// removeLabelled deletes managed-by=kglance objects of every kind setup creates, namespaced ones first.
-func removeLabelled(ctx context.Context, conn *kube.Conn) error {
-	cs, ns := conn.Client, kube.Namespace
+// removeLabelled deletes managed-by=kglance objects of every kind setup creates in ns, then cluster-scoped ones if asked.
+func removeLabelled(ctx context.Context, conn *kube.Conn, ns string, clusterScoped bool) error {
+	cs := conn.Client
 	sel := metav1.ListOptions{LabelSelector: kube.ManagedByLabel + "=" + kube.ManagedByValue}
 	listers := []struct {
-		kind string
-		list func() (runtime.Object, error)
+		kind          string
+		clusterScoped bool
+		list          func() (runtime.Object, error)
 	}{
-		{"DaemonSet", func() (runtime.Object, error) { return cs.AppsV1().DaemonSets(ns).List(ctx, sel) }},
-		{"RoleBinding", func() (runtime.Object, error) { return cs.RbacV1().RoleBindings(ns).List(ctx, sel) }},
-		{"Role", func() (runtime.Object, error) { return cs.RbacV1().Roles(ns).List(ctx, sel) }},
-		{"ClusterRoleBinding", func() (runtime.Object, error) { return cs.RbacV1().ClusterRoleBindings().List(ctx, sel) }},
-		{"ClusterRole", func() (runtime.Object, error) { return cs.RbacV1().ClusterRoles().List(ctx, sel) }},
-		{"ServiceAccount", func() (runtime.Object, error) { return cs.CoreV1().ServiceAccounts(ns).List(ctx, sel) }},
-		{"Namespace", func() (runtime.Object, error) { return cs.CoreV1().Namespaces().List(ctx, sel) }},
+		{"DaemonSet", false, func() (runtime.Object, error) { return cs.AppsV1().DaemonSets(ns).List(ctx, sel) }},
+		{"RoleBinding", false, func() (runtime.Object, error) { return cs.RbacV1().RoleBindings(ns).List(ctx, sel) }},
+		{"Role", false, func() (runtime.Object, error) { return cs.RbacV1().Roles(ns).List(ctx, sel) }},
+		{"ServiceAccount", false, func() (runtime.Object, error) { return cs.CoreV1().ServiceAccounts(ns).List(ctx, sel) }},
+		{"ClusterRoleBinding", true, func() (runtime.Object, error) { return cs.RbacV1().ClusterRoleBindings().List(ctx, sel) }},
+		{"ClusterRole", true, func() (runtime.Object, error) { return cs.RbacV1().ClusterRoles().List(ctx, sel) }},
+		{"Namespace", true, func() (runtime.Object, error) { return cs.CoreV1().Namespaces().List(ctx, sel) }},
 	}
 	for _, l := range listers {
+		if l.clusterScoped && !clusterScoped {
+			continue
+		}
 		list, err := l.list()
 		if err != nil {
 			return err

@@ -16,10 +16,10 @@ Binaries are also on the [Releases](https://github.com/rosenhouse-bot-sandbox/kg
 
 ## Getting started
 
-With your admin context on the management cluster, run `setup`, naming each workload cluster's Cluster API `Cluster`:
+With your admin context on the management cluster, run `setup`, naming the namespace and each workload cluster's Cluster API `Cluster` in it:
 
 ```bash
-$ kglance setup --workload my-namespace/wl1 -o agent.kubeconfig --instructions agent.md
+$ kglance setup --mgmt-namespace my-namespace --workload wl1 -o agent.kubeconfig --instructions agent.md
 wrote /home/me/agent.kubeconfig (contexts: mgmt, wl1; expires 19:10 UTC)
 wrote /home/me/kglance.state.json
 socket collector running on 4 nodes (1 control-plane, 3 worker)
@@ -44,7 +44,7 @@ read kglance.state.json: removing kglance from mgmt, wl1 ... done
 
 | Cluster | Access |
 |---|---|
-| Management | get, list and watch Cluster API objects, namespaces, nodes and events, but not Secrets |
+| Management | get, list and watch Cluster API objects and events in `--mgmt-namespace`, but not Secrets |
 | Workload | the `view` ClusterRole without Secrets, logs, exec, attach, port-forward or proxy |
 
 The collector runs on every Linux node of each workload cluster, including control-plane nodes.

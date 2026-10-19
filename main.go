@@ -18,39 +18,42 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/setup"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/teardown"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/version"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 const usage = `kglance hands an AI agent expiring, read-only kubectl access to Cluster API clusters.
 
 usage:
-  kglance setup [--context context] [--workload [name=]namespace/cluster]... [flags]
+  kglance setup --mgmt-namespace namespace [--context context] [--workload [name=]cluster]... [flags]
       Creates read-only service accounts, starts the socket collector and writes an agent kubeconfig.
-  kglance teardown [--state file | [--context context] [--workload namespace/cluster]...]
+  kglance teardown [--state file | --mgmt-namespace namespace [--context context] [--workload cluster]...]
       Removes everything setup created and revokes the agent's tokens.
   kglance version
       Prints the version and collector image.
 Run "kglance setup -h" or "kglance teardown -h" for flags.
 `
 
-const setupHelp = `usage: kglance setup [--context context] [--workload [name=]namespace/cluster]... [flags]
+const setupHelp = `usage: kglance setup --mgmt-namespace namespace [--context context] [--workload [name=]cluster]... [flags]
 
 Creates read-only service accounts on each cluster, starts the socket collector on
 workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
 
 --context, or the current context by default, names the Cluster API management cluster.
-Each --workload names a Cluster on it. Setup reaches that cluster with the admin
-kubeconfig in the Cluster's <cluster>-kubeconfig Secret. The agent kubeconfig has a
-context "mgmt" and one context per workload, named after the Cluster unless name= is given.
+Setup changes only the existing namespace --mgmt-namespace on it, and the agent can read
+only Cluster API objects and events there. Each --workload names a Cluster in that namespace.
+Setup reaches that cluster with the admin kubeconfig in the Cluster's <cluster>-kubeconfig Secret.
+The agent kubeconfig has a context "mgmt" and one context per workload, named after the
+Cluster unless name= is given.
 
 flags:
 `
 
-const teardownHelp = `usage: kglance teardown [--state file | [--context context] [--workload namespace/cluster]...]
+const teardownHelp = `usage: kglance teardown [--state file | --mgmt-namespace namespace [--context context] [--workload cluster]...]
 
 Removes everything setup created and revokes the agent's tokens.
-Without a state file, give the --context and --workload flags that setup used.
+Without a state file, give the --context, --workload and --mgmt-namespace flags that setup used.
 Teardown then removes objects labelled app.kubernetes.io/managed-by=kglance from those clusters.
 
 flags:
@@ -165,7 +168,8 @@ func parseSetup(args []string, errOut io.Writer) (setup.Options, string, error) 
 	var kubeconfig string
 	fs := newFlagSet("kglance setup", setupHelp, errOut)
 	fs.StringVar(&o.MgmtContext, "context", "", "management cluster's admin context (default the current context)")
-	fs.Var(&workloads, "workload", "workload cluster as [name=]namespace/cluster (repeatable)")
+	fs.StringVar(&o.MgmtNamespace, "mgmt-namespace", "", "existing management cluster namespace that holds the workload Clusters (required)")
+	fs.Var(&workloads, "workload", "workload Cluster as [name=]cluster (repeatable)")
 	fs.DurationVar(&o.TTL, "ttl", time.Hour, "agent token lifetime (10m to 8h)")
 	fs.StringVar(&o.KubeconfigPath, "output", "agent.kubeconfig", "agent kubeconfig path")
 	fs.StringVar(&o.KubeconfigPath, "o", "agent.kubeconfig", "shorthand for --output")
@@ -223,21 +227,25 @@ func parseTeardown(args []string, errOut io.Writer) (teardown.Options, string, e
 	fs := newFlagSet("kglance teardown", teardownHelp, errOut)
 	fs.StringVar(&o.StatePath, "state", "kglance.state.json", "state file written by setup")
 	fs.StringVar(&o.MgmtContext, "context", "", "without a state file, the management cluster's admin context (default the current context)")
-	fs.Var(&workloads, "workload", "without a state file, a workload cluster as namespace/cluster (repeatable)")
+	fs.StringVar(&o.MgmtNamespace, "mgmt-namespace", "", "without a state file, the --mgmt-namespace given to setup")
+	fs.Var(&workloads, "workload", "without a state file, a workload Cluster (repeatable)")
 	fs.StringVar(&kubeconfig, "kubeconfig", "", "admin kubeconfig (default $KUBECONFIG or ~/.kube/config)")
 	if err := parse(fs, args); err != nil {
 		return o, "", err
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	o.ByLabel = set["context"] || set["workload"]
+	o.ByLabel = set["context"] || set["workload"] || set["mgmt-namespace"]
 	var err error
 	if o.ByLabel && set["state"] {
-		err = errors.New("--state cannot be combined with --context or --workload")
+		err = errors.New("--state cannot be combined with --context, --workload or --mgmt-namespace")
 	}
-	for _, ref := range workloads {
-		if _, _, e := kube.SplitClusterRef(ref); e != nil {
-			err = e
+	if o.ByLabel && len(validation.IsDNS1123Label(o.MgmtNamespace)) > 0 {
+		err = fmt.Errorf("without a state file, --mgmt-namespace must name a namespace, not %q", o.MgmtNamespace)
+	}
+	for _, w := range workloads {
+		if len(validation.IsDNS1123Subdomain(w)) > 0 {
+			err = fmt.Errorf("invalid --workload %q: want cluster", w)
 		}
 	}
 	if err != nil {
