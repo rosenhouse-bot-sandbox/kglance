@@ -592,9 +592,9 @@ func TestRerunFailureKeepsPreviouslyRecordedObjects(t *testing.T) {
 
 func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 	cases := map[string]metav1.Object{
-		"Namespace kglance":              &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace}},
-		"ClusterRole kglance-agent-view": &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: map[string]string{"x": "y"}}},
-		"DaemonSet kglance-collector":    &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: kube.CollectorDS, Namespace: kube.Namespace}},
+		"Namespace kglance":                   &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace}},
+		"ClusterRole kglance-agent-view":      &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: map[string]string{"x": "y"}}},
+		"DaemonSet kglance/kglance-collector": &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: kube.CollectorDS, Namespace: kube.Namespace}},
 	}
 	for name, existing := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -602,7 +602,7 @@ func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 			fc := h.clusters["wl1"]
 			fc.cs.Tracker().Add(existing.(runtime.Object))
 			err := Run(context.Background(), h.options(wl1))
-			if err == nil || !strings.Contains(err.Error(), name+" exists and is not managed by kglance") {
+			if err == nil || !strings.Contains(err.Error(), "wl1: apply "+name+": exists and is not managed by kglance") {
 				t.Fatalf("err %v", err)
 			}
 			if appliedNothing := name == "Namespace kglance"; appliedNothing == strings.Contains(err.Error(), "teardown") {

@@ -242,3 +242,14 @@ func TestRunPrintsTheStepsDryRunChecks(t *testing.T) {
 		}
 	}
 }
+
+func TestRunNamesTheFailedStepAsDryRunDoes(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["mgmt"].cs.PrependReactor("patch", "roles", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+	err := Run(context.Background(), h.options())
+	if err == nil || !strings.HasPrefix(err.Error(), "mgmt: apply Role ns1/kglance-agent-capi: boom") {
+		t.Errorf("err %v", err)
+	}
+}

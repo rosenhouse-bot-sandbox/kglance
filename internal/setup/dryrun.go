@@ -42,7 +42,7 @@ func dryRun(ctx context.Context, o Options, clusters []*cluster) error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", c.Name, err)
 			}
-			report("apply "+describe(obj), problems)
+			report("apply "+kube.Describe(obj), problems)
 		}
 		problems, err := r.deniedProblems(ctx,
 			kube.Access{Verb: "create", Resource: "serviceaccounts", Subresource: "token", Namespace: c.namespace, Name: kube.AgentSA})
@@ -64,14 +64,6 @@ func dryRun(ctx context.Context, o Options, clusters []*cluster) error {
 	}
 	fmt.Fprintln(o.Out, "dry run passed")
 	return nil
-}
-
-func describe(obj kube.Object) string {
-	name := obj.GetName()
-	if ns := obj.GetNamespace(); ns != "" {
-		name = ns + "/" + name
-	}
-	return obj.GetObjectKind().GroupVersionKind().Kind + " " + name
 }
 
 // reviewer asks one cluster's API server about each access at most once.

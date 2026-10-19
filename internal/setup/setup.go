@@ -271,7 +271,7 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 			return err
 		}
 		if exists && !managed {
-			return fmt.Errorf("%s %s exists and is not managed by kglance", kind, obj.GetName())
+			return fmt.Errorf("apply %s: exists and is not managed by kglance", kube.Describe(obj))
 		}
 		if err := kube.Apply(ctx, c.conn.Client, obj); err != nil {
 			return err
@@ -282,7 +282,7 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 		if err := record(); err != nil {
 			return err
 		}
-		fmt.Fprintf(o.Out, "%s: apply %s: ok\n", c.Name, describe(obj))
+		fmt.Fprintf(o.Out, "%s: apply %s: ok\n", c.Name, kube.Describe(obj))
 	}
 	return nil
 }
