@@ -80,8 +80,11 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "clusters.cluster.x-k8s.io")
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "machines.cluster.x-k8s.io")
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "events")
+		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "pods,services,deployments")
 		e.forbidden(t, agentKC, "mgmt", "get", "clusters.cluster.x-k8s.io", "-A")
 		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "secrets")
+		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "logs", "x")
+		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "exec", "x", "--", "true")
 		e.forbidden(t, agentKC, "mgmt", "-n", "kube-system", "get", "secret", "foo")
 	})
 

@@ -219,7 +219,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	ctx := context.Background()
 
 	m, w := h.clusters["mgmt"].cs, h.clusters["wl1"].cs
-	if _, err := m.RbacV1().Roles("ns1").Get(ctx, kube.AgentCAPIRole, metav1.GetOptions{}); err != nil {
+	if _, err := m.RbacV1().Roles("ns1").Get(ctx, kube.AgentMgmtRole, metav1.GetOptions{}); err != nil {
 		t.Error("mgmt: capi role missing")
 	}
 	if _, err := m.AppsV1().DaemonSets(kube.Namespace).Get(ctx, kube.CollectorDS, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -745,7 +745,7 @@ func TestRunTouchesOnlyMgmtNamespaceOnMgmt(t *testing.T) {
 			t.Errorf("mgmt: %s %s in %q", a.GetVerb(), a.GetResource().Resource, a.GetNamespace())
 		}
 	}
-	if !strings.Contains(h.out.String(), "Cluster API objects and events in namespace ns1") {
+	if !strings.Contains(h.out.String(), "Cluster API and VM Operator objects, pods, services, deployments and events in namespace ns1") {
 		t.Errorf("instructions:\n%s", h.out.String())
 	}
 }

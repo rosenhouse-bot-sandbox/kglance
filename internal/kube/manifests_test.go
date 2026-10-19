@@ -81,9 +81,9 @@ func TestAgentViewClusterRoleAddsEvents(t *testing.T) {
 	}
 }
 
-func TestAgentCAPIRoleIsReadOnlyCAPIWithoutSecrets(t *testing.T) {
-	r := CAPIReadRole("team")
-	if r.Namespace != "team" || r.Name != AgentCAPIRole {
+func TestMgmtReadRoleIsReadOnlyWithoutSecrets(t *testing.T) {
+	r := MgmtReadRole("team")
+	if r.Namespace != "team" || r.Name != AgentMgmtRole {
 		t.Errorf("%s/%s", r.Namespace, r.Name)
 	}
 	for _, g := range []string{"cluster.x-k8s.io", "infrastructure.cluster.x-k8s.io", "controlplane.cluster.x-k8s.io", "bootstrap.cluster.x-k8s.io", "addons.cluster.x-k8s.io", "ipam.cluster.x-k8s.io", "runtime.cluster.x-k8s.io"} {
@@ -91,11 +91,20 @@ func TestAgentCAPIRoleIsReadOnlyCAPIWithoutSecrets(t *testing.T) {
 			t.Errorf("missing group %s", g)
 		}
 	}
-	if !allows(r.Rules, "", "events", "list") || !allows(r.Rules, "events.k8s.io", "events", "watch") {
-		t.Error("missing events")
+	for _, c := range []struct{ group, res string }{
+		{"", "events"}, {"events.k8s.io", "events"}, {"", "pods"}, {"", "services"}, {"apps", "deployments"},
+		{"vmoperator.vmware.com", "virtualmachineservices"},
+	} {
+		if !allows(r.Rules, c.group, c.res, "watch") {
+			t.Errorf("missing %q/%s", c.group, c.res)
+		}
 	}
-	if allows(r.Rules, "", "secrets", "get") || allows(r.Rules, "", "anything", "get") {
-		t.Error("core wildcard or secrets granted")
+	for _, c := range []struct{ group, res string }{
+		{"", "secrets"}, {"", "anything"}, {"", "pods/log"}, {"", "pods/exec"}, {"", "services/proxy"}, {"apps", "anything"},
+	} {
+		if allows(r.Rules, c.group, c.res, "get") {
+			t.Errorf("granted %q/%s", c.group, c.res)
+		}
 	}
 	for _, rule := range r.Rules {
 		if !slices.Equal(rule.Verbs, []string{"get", "list", "watch"}) {
@@ -265,7 +274,7 @@ func TestMgmtObjectsAreInTheGivenNamespace(t *testing.T) {
 			t.Errorf("%T %s in %q", o, o.GetName(), o.GetNamespace())
 		}
 	}
-	if rb := objs[2].(*rbacv1.RoleBinding); rb.RoleRef.Name != AgentCAPIRole || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: AgentSA, Namespace: "team"}) {
+	if rb := objs[2].(*rbacv1.RoleBinding); rb.RoleRef.Name != AgentMgmtRole || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: AgentSA, Namespace: "team"}) {
 		t.Errorf("binding %+v", rb)
 	}
 }
