@@ -54,7 +54,7 @@ func dryRunCluster(ctx context.Context, o Options, c *cluster, report func(strin
 		ns = kube.NamespaceObject(o.Now(), time.Time{})
 		reaper = kube.ReaperObjects(o.Image)
 	}
-	access, err := accessObjects(ctx, o, c, ns)
+	access, err := accessObjects(ctx, o, c, ns, func(a kube.Access) (bool, error) { return r.allowed(ctx, a) })
 	if err != nil {
 		return fmt.Errorf("%s: %w", c.Name, err)
 	}
@@ -134,16 +134,24 @@ func (r reviewer) gone(obj kube.Object) bool {
 	return r.terminating && (obj.GetNamespace() == kube.Namespace || obj.GetObjectKind().GroupVersionKind().Kind == "Namespace")
 }
 
+func (r reviewer) allowed(ctx context.Context, a kube.Access) (bool, error) {
+	ok, done := r.asked[a]
+	if !done {
+		var err error
+		if ok, err = kube.Allowed(ctx, r.cs, a); err != nil {
+			return false, err
+		}
+		r.asked[a] = ok
+	}
+	return ok, nil
+}
+
 func (r reviewer) denied(ctx context.Context, accesses ...kube.Access) ([]kube.Access, error) {
 	var out []kube.Access
 	for _, a := range accesses {
-		ok, done := r.asked[a]
-		if !done {
-			var err error
-			if ok, err = kube.Allowed(ctx, r.cs, a); err != nil {
-				return nil, fmt.Errorf("review %s: %w", a, err)
-			}
-			r.asked[a] = ok
+		ok, err := r.allowed(ctx, a)
+		if err != nil {
+			return nil, fmt.Errorf("review %s: %w", a, err)
 		}
 		if !ok {
 			out = append(out, a)

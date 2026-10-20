@@ -26,6 +26,7 @@ import (
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -156,6 +157,19 @@ func collectorPod(name, node string, ready bool) *corev1.Pod {
 	}
 }
 
+var mgmtResources = []*metav1.APIResourceList{
+	{GroupVersion: "v1", APIResources: []metav1.APIResource{
+		{Name: "pods", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+		{Name: "secrets", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+	}},
+	{GroupVersion: "cluster.x-k8s.io/v1beta2", APIResources: []metav1.APIResource{
+		{Name: "clusters", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+	}},
+	{GroupVersion: "vmoperator.vmware.com/v1alpha3", APIResources: []metav1.APIResource{
+		{Name: "virtualmachines", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+	}},
+}
+
 type harness struct {
 	t        *testing.T
 	dir      string
@@ -167,6 +181,7 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, dir: t.TempDir(), clusters: map[string]*fakeCluster{}}
 	h.clusters["mgmt"] = newFakeCluster(t, "https://mgmt:6443", 0)
 	h.clusters["mgmt"].tokenNS = "ns1"
+	h.clusters["mgmt"].cs.Resources = mgmtResources
 	h.addWorkload("wl1", 0)
 	h.addWorkload("wl2", 0)
 	return h
@@ -789,6 +804,40 @@ func TestRunRefusesMgmtObjectsRecordedOutsideTheNamespace(t *testing.T) {
 	}
 }
 
+func TestRunGrantsOnlyMgmtReadsTheCallerHolds(t *testing.T) {
+	h := newHarness(t)
+	m := h.clusters["mgmt"]
+	m.deny = deniesAny(denies("watch", "virtualmachines"), func(a authzv1.ResourceAttributes) bool { return a.Resource == "clusters" })
+	if err := Run(context.Background(), h.options()); err != nil {
+		t.Fatalf("%v\n%s", err, h.out.String())
+	}
+	if want := "mgmt: skip reads you do not hold: get,list,watch clusters.cluster.x-k8s.io -n ns1, watch virtualmachines.vmoperator.vmware.com -n ns1\n"; !strings.Contains(h.out.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, h.out.String())
+	}
+	role, err := m.cs.RbacV1().Roles("ns1").Get(context.Background(), kube.AgentMgmtRole, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch"}},
+		{APIGroups: []string{"vmoperator.vmware.com"}, Resources: []string{"virtualmachines"}, Verbs: []string{"get", "list"}},
+	}
+	if !equality.Semantic.DeepEqual(role.Rules, want) {
+		t.Errorf("rules %+v", role.Rules)
+	}
+}
+
+func TestRunFailsWhenMgmtReadReviewsFail(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["mgmt"].cs.PrependReactor("create", "selfsubjectaccessreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+	want := "mgmt: review get pods -n ns1: boom"
+	if err := Run(context.Background(), h.options()); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("got %v want %s", err, want)
+	}
+}
+
 func TestRunTouchesOnlyMgmtNamespaceOnMgmt(t *testing.T) {
 	h := newHarness(t)
 	m := h.clusters["mgmt"]
@@ -796,11 +845,14 @@ func TestRunTouchesOnlyMgmtNamespaceOnMgmt(t *testing.T) {
 		t.Fatalf("%v\n%s", err, h.err.String())
 	}
 	for _, a := range m.cs.Actions() {
-		if a.GetNamespace() != "ns1" {
+		if a.GetNamespace() != "ns1" && !slices.Contains([]string{"group", "resource", "selfsubjectaccessreviews"}, a.GetResource().Resource) {
 			t.Errorf("mgmt: %s %s in %q", a.GetVerb(), a.GetResource().Resource, a.GetNamespace())
 		}
 	}
-	if !strings.Contains(h.out.String(), "Cluster API and VM Operator objects, pods, services, deployments and events in namespace ns1") {
+	if strings.Contains(h.out.String(), "skip reads") {
+		t.Errorf("skipped reads:\n%s", h.out.String())
+	}
+	if !strings.Contains(h.out.String(), "Clusters, VirtualMachines, VirtualMachineServices and built-in objects other than Secrets and RBAC in namespace ns1") {
 		t.Errorf("instructions:\n%s", h.out.String())
 	}
 }

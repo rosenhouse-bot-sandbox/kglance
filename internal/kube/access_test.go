@@ -28,12 +28,12 @@ func TestAccessString(t *testing.T) {
 }
 
 func TestAccessToObject(t *testing.T) {
-	r := MgmtReadRole("ns1")
+	r := MgmtReadRole("ns1", nil)
 	want := Access{Verb: "patch", Group: rbacv1.GroupName, Resource: "roles", Namespace: "ns1", Name: AgentMgmtRole}
 	if got := AccessTo("patch", r); got != want {
 		t.Errorf("got %+v", got)
 	}
-	for _, o := range slices.Concat(MgmtObjects("ns1"), allWorkloadObjects()) {
+	for _, o := range slices.Concat(MgmtObjects("ns1", nil), allWorkloadObjects()) {
 		if a := AccessTo("get", o); a.Resource == "" || a.Name != o.GetName() || a.Namespace != o.GetNamespace() {
 			t.Errorf("%T: %+v", o, a)
 		}

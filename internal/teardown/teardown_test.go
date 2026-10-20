@@ -268,7 +268,7 @@ func TestRunWithoutStateFileFails(t *testing.T) {
 
 func TestRunByLabelDeletesLabelledObjectsOnly(t *testing.T) {
 	h := newHarness(t, "wl1", "wl2")
-	for _, o := range kube.MgmtObjects("ns1") {
+	for _, o := range kube.MgmtObjects("ns1", nil) {
 		if err := kube.Apply(context.Background(), h.mgmt, o); err != nil {
 			t.Fatal(err)
 		}

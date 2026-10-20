@@ -112,12 +112,9 @@ func TestDryRunReportsWhatWouldFail(t *testing.T) {
 		"collector pods": {"wl1", denies("list", "pods"), []string{
 			"wl1: read collector status: denied: list pods -n kglance",
 		}},
-		"role grants without escalate or bind": {"mgmt", deniesAny(denies("escalate", "roles"), denies("bind", "roles"), denies("list", "pods")), []string{
-			"mgmt: apply Role ns1/kglance-agent-capi: needs escalate or these permissions: list pods -n ns1",
-			"mgmt: apply RoleBinding ns1/kglance-agent-capi: needs bind or these permissions: list pods -n ns1",
-		}},
-		"role grants without escalate": {"mgmt", deniesAny(denies("escalate", "roles"), denies("list", "pods"), denies("watch", "pods")), []string{
-			"mgmt: apply Role ns1/kglance-agent-capi: needs escalate or these permissions: list,watch pods -n ns1",
+		"role grants without escalate or bind": {"wl1", deniesAny(denies("escalate", "roles"), denies("bind", "roles"), denies("get", "configmaps")), []string{
+			"wl1: apply Role kglance/kglance-agent: needs escalate or these permissions: get configmaps -n kglance",
+			"wl1: apply RoleBinding kglance/kglance-agent: needs bind or these permissions: get configmaps -n kglance",
 		}},
 		"cluster role grants without escalate": {"wl1", deniesAny(denies("escalate", "clusterroles"), denies("get", "configmaps")), []string{
 			"wl1: apply ClusterRole kglance-agent-view: needs escalate or these permissions: get configmaps",
@@ -151,13 +148,13 @@ func TestDryRunReportsWhatWouldFail(t *testing.T) {
 
 func TestDryRunChecksGrantsOnlyWithoutEscalate(t *testing.T) {
 	h := newHarness(t)
-	o := h.options()
+	o := h.options(wl1)
 	o.DryRun = true
 	if err := Run(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range h.clusters["mgmt"].reviews {
-		if a.Resource == "pods" {
+	for _, a := range h.clusters["wl1"].reviews {
+		if a.Resource == "configmaps" {
 			t.Errorf("checked grant %+v despite escalate", a)
 		}
 	}
@@ -216,6 +213,19 @@ func TestDryRunReportsReadErrors(t *testing.T) {
 		t.Errorf("err %v", err)
 	}
 	if want := "mgmt: apply ServiceAccount ns1/kglance-agent: get ServiceAccount kglance-agent: boom\n"; !strings.Contains(h.out.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, h.out.String())
+	}
+}
+
+func TestDryRunSkipsMgmtReadsTheCallerDoesNotHold(t *testing.T) {
+	h := newHarness(t)
+	h.clusters["mgmt"].deny = deniesAny(denies("watch", "virtualmachines"), denies("escalate", "roles"), denies("bind", "roles"))
+	o := h.options()
+	o.DryRun = true
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatalf("%v\n%s", err, h.out.String())
+	}
+	if want := "mgmt: skip reads you do not hold: watch virtualmachines.vmoperator.vmware.com -n ns1\n"; !strings.Contains(h.out.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, h.out.String())
 	}
 }
