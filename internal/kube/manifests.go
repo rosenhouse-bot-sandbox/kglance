@@ -241,6 +241,8 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 						AllowPrivilegeEscalation: &no,
 						Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"SYS_PTRACE", "DAC_READ_SEARCH"}},
 						SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+						// The runtime's default AppArmor profile denies reading other processes' /proc/<pid>/ns links.
+						AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
 					},
 				}},
 			},

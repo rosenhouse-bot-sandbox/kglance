@@ -1,12 +1,17 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -17,7 +22,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
@@ -104,13 +111,53 @@ func fixtureObjects() []runtime.Object {
 
 var fixedTime = time.Date(2026, 10, 15, 18, 42, 7, 123, time.FixedZone("x", 3600))
 
-func newCollector(client *fake.Clientset, nodeName string) *Collector {
+func newCollector(client kubernetes.Interface, nodeName string) *Collector {
 	return &Collector{
 		Client:  client,
 		Cluster: "wl1",
 		Node:    nodeName,
 		Proc:    fixtureProc(),
 		Now:     func() time.Time { return fixedTime },
+		Log:     slog.New(slog.DiscardHandler),
+	}
+}
+
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLog(c *Collector) *logBuffer {
+	b := &logBuffer{}
+	c.Log = slog.New(slog.NewTextHandler(b, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+	return b
+}
+
+func assertLogged(t *testing.T, log *logBuffer, lines ...string) {
+	t.Helper()
+	for _, l := range lines {
+		if !strings.Contains(log.String(), l) {
+			t.Errorf("log lacks %q:\n%s", l, log)
+		}
 	}
 }
 
@@ -224,9 +271,11 @@ func TestRunSnapshotsImmediatelyAndRetriesAfterErrors(t *testing.T) {
 		cancel()
 		return false, nil, nil
 	})
+	c := newCollector(client, "cp1")
+	log := captureLog(c)
 	done := make(chan struct{})
 	go func() {
-		newCollector(client, "cp1").Run(ctx, 10*time.Millisecond)
+		c.Run(ctx, 10*time.Millisecond)
 		close(done)
 	}()
 	select {
@@ -238,6 +287,69 @@ func TestRunSnapshotsImmediatelyAndRetriesAfterErrors(t *testing.T) {
 		t.Errorf("applies %d", applies.Load())
 	}
 	readRows(t, client, "cp1")
+	assertLogged(t, log,
+		"level=INFO msg=\"collector started\" cluster=wl1 node=cp1 interval=10ms\n",
+		"level=ERROR msg=\"snapshot failed\" err=\"apply configmap: boom\"\n",
+		"level=INFO msg=\"snapshot written\" sockets=4\n",
+	)
+}
+
+func hungClient(t *testing.T) kubernetes.Interface {
+	t.Helper()
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(hung.Close)
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: hung.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func TestRunTimesOutHungSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		interval, timeout time.Duration
+		want              time.Duration
+	}{
+		{"timeout", 10 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond},
+		{"interval", 200 * time.Millisecond, 10 * time.Millisecond, 200 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCollector(hungClient(t), "cp1")
+			c.Timeout = tc.timeout
+			log := captureLog(c)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			start := time.Now()
+			go func() {
+				c.Run(ctx, tc.interval)
+				close(done)
+			}()
+			defer func() { cancel(); <-done }()
+			for !strings.Contains(log.String(), "snapshot failed") {
+				if time.Since(start) > 5*tc.want {
+					t.Fatalf("no timeout logged after %v:\n%s", time.Since(start), log)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if elapsed := time.Since(start); elapsed < tc.want {
+				t.Errorf("timed out after %v, want %v", elapsed, tc.want)
+			}
+			assertLogged(t, log, `level=ERROR msg="snapshot failed" err="get node: Get \"`+c.Client.CoreV1().RESTClient().Get().AbsPath("/api/v1/nodes/cp1").URL().String()+`\": context deadline exceeded"`+"\n")
+		})
+	}
+}
+
+func TestRunLogsNoFailureWhenCancelled(t *testing.T) {
+	c := newCollector(hungClient(t), "cp1")
+	c.Timeout = time.Hour
+	log := captureLog(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.Run(ctx, time.Hour)
+	if strings.Contains(log.String(), "snapshot failed") {
+		t.Errorf("logged failure on cancel:\n%s", log)
+	}
 }
 
 func TestRunStartsWithoutWaitingForInterval(t *testing.T) {
@@ -320,6 +432,7 @@ func TestSnapshotMarksTruncatedSocketsJSONL(t *testing.T) {
 	client := fake.NewClientset(fixtureObjects()...)
 	c := newCollector(client, "cp1")
 	c.MaxDataBytes = 600
+	log := captureLog(c)
 	if err := c.Snapshot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +440,7 @@ func TestSnapshotMarksTruncatedSocketsJSONL(t *testing.T) {
 	if got, want := cm.Annotations[kube.TruncatedAnnotation], fmt.Sprintf("kept %d of 4 rows", len(rows)); got != want || len(rows) >= 4 {
 		t.Errorf("annotation %q want %q", got, want)
 	}
+	assertLogged(t, log, fmt.Sprintf("level=WARN msg=\"sockets.jsonl truncated to fit the ConfigMap size limit\" kept=%d sockets=4\n", len(rows)))
 
 	c.MaxDataBytes = 0
 	if err := c.Snapshot(context.Background()); err != nil {

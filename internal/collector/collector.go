@@ -53,7 +53,7 @@ func Main(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	c := &Collector{Client: client, Cluster: cluster, Node: nodeName, Proc: os.DirFS("/proc"), Now: time.Now}
+	c := &Collector{Client: client, Cluster: cluster, Node: nodeName, Proc: os.DirFS("/proc"), Now: time.Now, Log: slog.Default(), Timeout: 30 * time.Second}
 	c.Run(ctx, *interval)
 	return nil
 }
@@ -64,20 +64,27 @@ type Collector struct {
 	Node    string
 	Proc    fs.FS
 	Now     func() time.Time
+	Log     *slog.Logger
+	// Timeout bounds the API calls of each snapshot, or the interval if that is longer.
+	Timeout time.Duration
 	// MaxDataBytes defaults to defaultMaxDataBytes.
 	MaxDataBytes int
 }
 
 // Run takes a snapshot immediately and then every interval until ctx is done.
 func (c *Collector) Run(ctx context.Context, interval time.Duration) {
+	c.Log.Info("collector started", "cluster", c.Cluster, "node", c.Node, "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := c.Snapshot(ctx); err != nil {
+		snapshotCtx, cancel := context.WithTimeout(ctx, max(c.Timeout, interval))
+		err := c.Snapshot(snapshotCtx)
+		cancel()
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			slog.Error("snapshot failed", "err", err)
+			c.Log.Error("snapshot failed", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -132,14 +139,14 @@ func (c *Collector) Snapshot(ctx context.Context) error {
 		WithLabels(map[string]string{kube.SnapshotLabel: "true", kube.ManagedByLabel: kube.ManagedByValue}).
 		WithData(map[string]string{"sockets.jsonl": jsonl, "raw.txt": raw})
 	if kept < len(rows) {
-		slog.Warn("sockets.jsonl truncated to fit the ConfigMap size limit", "kept", kept, "sockets", len(rows))
+		c.Log.Warn("sockets.jsonl truncated to fit the ConfigMap size limit", "kept", kept, "sockets", len(rows))
 		cm.WithAnnotations(map[string]string{kube.TruncatedAnnotation: fmt.Sprintf("kept %d of %d rows", kept, len(rows))})
 	}
 	_, err = c.Client.CoreV1().ConfigMaps(kube.Namespace).Apply(ctx, cm, metav1.ApplyOptions{FieldManager: kube.FieldManager, Force: true})
 	if err != nil {
 		return fmt.Errorf("apply configmap: %w", err)
 	}
-	slog.Info("snapshot written", "sockets", len(rows))
+	c.Log.Info("snapshot written", "sockets", len(rows))
 	return nil
 }
 
