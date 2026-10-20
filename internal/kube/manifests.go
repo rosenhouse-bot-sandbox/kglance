@@ -303,7 +303,7 @@ func Reaper(image string) *appsv1.Deployment {
 	}}
 }
 
-// MgmtObjects grant reads in the existing namespace ns only.
+// MgmtObjects returns the objects that grant reads in the existing namespace ns only.
 func MgmtObjects(ns string, reads []Access) []Object {
 	return []Object{
 		ServiceAccount(ns, AgentSA),

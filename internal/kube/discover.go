@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -25,7 +26,8 @@ func builtIn(group string) bool {
 }
 
 func mgmtResource(gr schema.GroupResource) bool {
-	return slices.Contains(mgmtReadCRDs, gr) || builtIn(gr.Group) && gr != schema.GroupResource{Resource: "secrets"}
+	return slices.Contains(mgmtReadCRDs, gr) ||
+		builtIn(gr.Group) && gr.Group != rbacv1.GroupName && gr != schema.GroupResource{Resource: "secrets"}
 }
 
 // ResourceLister is the part of a discovery client that MgmtReads uses.
@@ -34,7 +36,7 @@ type ResourceLister interface {
 }
 
 // MgmtReads lists the get, list and watch requests in namespace ns that the server supports
-// for mgmtReadCRDs and the namespaced built-in resources other than Secrets.
+// for mgmtReadCRDs and the namespaced built-in resources other than Secrets and RBAC.
 // It ignores discovery failures of groups without mgmtReadCRDs, such as an unavailable metrics.k8s.io.
 func MgmtReads(d ResourceLister, ns string) ([]Access, error) {
 	_, lists, err := d.ServerGroupsAndResources()

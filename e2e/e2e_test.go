@@ -95,6 +95,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "events")
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "pods,services,deployments,configmaps,jobs")
 		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "machines.cluster.x-k8s.io")
+		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "roles")
 		e.forbidden(t, agentKC, "mgmt", "get", "clusters.cluster.x-k8s.io", "-A")
 		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "secrets")
 		e.forbidden(t, agentKC, "mgmt", "get", "--raw", "/api/v1/namespaces/"+listenerNS+"/pods/x/log")
@@ -116,7 +117,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 	t.Run("dry run as the agent", func(t *testing.T) {
 		out, err := e.kglance("setup", "--kubeconfig", agentKC, "--context", "mgmt", "--mgmt-namespace", listenerNS,
 			"--state", filepath.Join(t.TempDir(), "state.json"), "-o", filepath.Join(t.TempDir(), "kubeconfig"), "--dry-run")
-		want := "mgmt: apply ServiceAccount " + listenerNS + "/kglance-agent: denied: get,create,patch serviceaccounts/kglance-agent -n " + listenerNS + "\n"
+		want := "mgmt: apply Role " + listenerNS + "/kglance-agent-capi: denied: get,create,patch roles.rbac.authorization.k8s.io/kglance-agent-capi -n " + listenerNS + "\n"
 		if err == nil || !strings.Contains(out, want) || !strings.Contains(out, "dry run: 4 of 4 steps would fail") {
 			t.Errorf("err %v; want %q in:\n%s", err, want, out)
 		}
@@ -286,15 +287,16 @@ subjects: [{kind: ServiceAccount, name: ns-admin, namespace: %[1]s}]
 		t.Errorf("dry run output:\n%s", out)
 	}
 	out := e.mustKglance(setup...)
-	if !regexp.MustCompile(`mgmt: skip reads you do not hold: (.*, )?watch configmaps -n `+ns).MatchString(out) {
+	if !regexp.MustCompile(`mgmt: skip reads you do not hold: (.*, )?watch configmaps -n ` + ns).MatchString(out) {
 		t.Errorf("setup output lacks skipped watch configmaps:\n%s", out)
 	}
 	agentKC := filepath.Join(e.dir, "ns-admin-agent.kubeconfig")
 	e.allowed(t, agentKC, "mgmt", "-n", ns, "get", "clusters.cluster.x-k8s.io,pods,services,deployments,events,configmaps")
 	e.forbidden(t, agentKC, "mgmt", "-n", ns, "get", "machines.cluster.x-k8s.io")
 	e.forbidden(t, agentKC, "mgmt", "-n", ns, "get", "jobs")
-	e.mustKglance("teardown", "--state", "ns-admin.state.json")
-	e.waitUnauthorized(agentKC, "mgmt")
+	lastKC := e.copyFile(agentKC)
+	e.mustKglance("teardown", "--kubeconfig", kc, "--state", "ns-admin.state.json")
+	e.waitUnauthorized(lastKC, "mgmt")
 }
 
 func (e *env) mustApply(ctx, manifest string) {

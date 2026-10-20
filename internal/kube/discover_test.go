@@ -46,6 +46,9 @@ var servedResources = []*metav1.APIResourceList{
 	{GroupVersion: "apps/v1", APIResources: []metav1.APIResource{
 		{Name: "deployments", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
 	}},
+	{GroupVersion: "rbac.authorization.k8s.io/v1", APIResources: []metav1.APIResource{
+		{Name: "roles", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+	}},
 	{GroupVersion: "networking.k8s.io/v1", APIResources: []metav1.APIResource{
 		{Name: "ingresses", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
 	}},
@@ -77,14 +80,15 @@ func TestMgmtReadsListsReadVerbsOfServedMgmtResources(t *testing.T) {
 func TestMgmtReadsIgnoresDiscoveryFailuresOfOtherGroups(t *testing.T) {
 	failed := &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{{Group: "metrics.k8s.io", Version: "v1beta1"}: errors.New("down")}}
 	got, err := MgmtReads(fakeResourceLister{lists: servedResources, err: failed}, "team")
-	if err != nil || len(got) != 15 {
-		t.Errorf("%d reads, err %v", len(got), err)
+	want, _ := MgmtReads(fakeResourceLister{lists: servedResources}, "team")
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("got %+v, err %v", got, err)
 	}
 }
 
 func TestMgmtReadsFailsWhenDiscoveryOfACRDGroupFails(t *testing.T) {
 	for name, err := range map[string]error{
-		"mgmt group":  &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{{Group: "vmoperator.vmware.com", Version: "v1alpha3"}: errors.New("down")}},
+		"vm operator": &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{{Group: "vmoperator.vmware.com", Version: "v1alpha3"}: errors.New("down")}},
 		"cluster api": &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{{Group: "cluster.x-k8s.io", Version: "v1beta2"}: errors.New("down")}},
 		"all":         errors.New("down"),
 	} {

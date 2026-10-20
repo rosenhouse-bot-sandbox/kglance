@@ -26,6 +26,7 @@ import (
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -821,7 +822,7 @@ func TestRunGrantsOnlyMgmtReadsTheCallerHolds(t *testing.T) {
 		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch"}},
 		{APIGroups: []string{"vmoperator.vmware.com"}, Resources: []string{"virtualmachines"}, Verbs: []string{"get", "list"}},
 	}
-	if !slices.EqualFunc(role.Rules, want, func(a, b rbacv1.PolicyRule) bool { return fmt.Sprint(a) == fmt.Sprint(b) }) {
+	if !equality.Semantic.DeepEqual(role.Rules, want) {
 		t.Errorf("rules %+v", role.Rules)
 	}
 }
@@ -848,7 +849,10 @@ func TestRunTouchesOnlyMgmtNamespaceOnMgmt(t *testing.T) {
 			t.Errorf("mgmt: %s %s in %q", a.GetVerb(), a.GetResource().Resource, a.GetNamespace())
 		}
 	}
-	if !strings.Contains(h.out.String(), "Clusters, VirtualMachines, VirtualMachineServices and built-in objects other than Secrets in namespace ns1") {
+	if strings.Contains(h.out.String(), "skip reads") {
+		t.Errorf("skipped reads:\n%s", h.out.String())
+	}
+	if !strings.Contains(h.out.String(), "Clusters, VirtualMachines, VirtualMachineServices and built-in objects other than Secrets and RBAC in namespace ns1") {
 		t.Errorf("instructions:\n%s", h.out.String())
 	}
 }
