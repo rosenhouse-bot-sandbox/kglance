@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/clientcmd"
@@ -54,6 +56,10 @@ type fakeCluster struct {
 	ready     bool
 	stale     bool
 	status    func(*appsv1.DaemonSetStatus)
+	// reaper sets the reaper Deployment's status; nil means available.
+	reaper func(*appsv1.Deployment)
+	// namespaces counts namespace creations, which get UIDs ns-uid-1, ns-uid-2, ...
+	namespaces int
 }
 
 func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCluster {
@@ -83,6 +89,29 @@ func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCl
 		}
 		tr.Status = authv1.TokenRequestStatus{Token: "tok-" + server, ExpirationTimestamp: metav1.NewTime(now.Add(ttl))}
 		return true, tr, nil
+	})
+	cs.PrependReactor("patch", "namespaces", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		name := a.(k8stesting.PatchAction).GetName()
+		if _, err := cs.Tracker().Get(corev1.SchemeGroupVersion.WithResource("namespaces"), "", name); apierrors.IsNotFound(err) {
+			fc.namespaces++
+			uid := types.UID(fmt.Sprintf("ns-uid-%d", fc.namespaces))
+			if err := cs.Tracker().Add(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, UID: uid}}); err != nil {
+				return true, nil, err
+			}
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("get", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		obj, err := cs.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("deployments"), kube.Namespace, kube.ReaperDeployment)
+		if err != nil {
+			return true, nil, err
+		}
+		d := obj.(*appsv1.Deployment).DeepCopy()
+		d.Generation, d.Status = 1, appsv1.DeploymentStatus{ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
+		if fc.reaper != nil {
+			fc.reaper(d)
+		}
+		return true, d, nil
 	})
 	cs.PrependReactor("get", "daemonsets", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		obj, err := cs.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("daemonsets"), kube.Namespace, kube.CollectorDS)
@@ -276,8 +305,21 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	if sw.Role != state.RoleWorkload || sw.Context != "mgmt-ctx" || sw.ClusterRef != "ns1/wl1" || sw.Server != "https://wl1:6443" || sw.CAFingerprint != fp || fp == "" {
 		t.Errorf("wl1 record %+v", sw)
 	}
-	if len(sw.Objects) != 12 || sw.Objects[11] != (state.Object{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "kglance", Name: "kglance-collector"}) {
+	if len(sw.Objects) != 16 || sw.Objects[0].Kind != "Namespace" || sw.Objects[15] != (state.Object{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "kglance", Name: "kglance-collector"}) {
 		t.Errorf("objects %+v", sw.Objects)
+	}
+	ns, err := w.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at, err := kube.ExpiresAt(ns); err != nil || !at.Equal(now.Add(time.Hour)) {
+		t.Errorf("reaper deadline %v %v", at, err)
+	}
+	if owners := view.OwnerReferences; len(owners) != 1 || owners[0].UID != ns.UID || ns.UID == "" {
+		t.Errorf("agent view ClusterRole owners %+v, namespace UID %q", owners, ns.UID)
+	}
+	if _, err := w.AppsV1().Deployments(kube.Namespace).Get(ctx, kube.ReaperDeployment, metav1.GetOptions{}); err != nil {
+		t.Errorf("reaper: %v", err)
 	}
 	if sm := st.Find("mgmt"); len(sm.Objects) != 3 || sm.Context != "mgmt-ctx" || sm.ClusterRef != "" {
 		t.Errorf("mgmt record %+v", sm)
@@ -329,7 +371,7 @@ func TestRerunKeepsRecordedClustersNotGivenAgain(t *testing.T) {
 	if len(st.Clusters) != 3 || st.Find("wl2") == nil {
 		t.Fatalf("clusters %+v", st.Clusters)
 	}
-	if n := len(st.Find("wl1").Objects); n != 12 {
+	if n := len(st.Find("wl1").Objects); n != 16 {
 		t.Errorf("wl1 records %d objects", n)
 	}
 	if n := len(h.clusters["wl1"].tokenTTLs); n != 2 {
@@ -559,7 +601,7 @@ func TestRunRecordsObjectsAppliedBeforeAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := st.Find("wl1")
-	if rec == nil || len(rec.Objects) != 11 || rec.Objects[0].Kind != "Namespace" || rec.Objects[10].Kind != "RoleBinding" {
+	if rec == nil || len(rec.Objects) != 15 || rec.Objects[0].Kind != "Namespace" || rec.Objects[14].Kind != "RoleBinding" {
 		t.Fatalf("record %+v", rec)
 	}
 }
@@ -575,7 +617,7 @@ func TestRerunFailureKeepsPreviouslyRecordedObjects(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	st, _ := state.Load(o.StatePath)
-	if objs := st.Find("wl1").Objects; len(objs) != 12 || objs[11].Kind != "DaemonSet" {
+	if objs := st.Find("wl1").Objects; len(objs) != 16 || objs[15].Kind != "DaemonSet" {
 		t.Fatalf("objects %+v", objs)
 	}
 }
@@ -747,5 +789,259 @@ func TestRunTouchesOnlyMgmtNamespaceOnMgmt(t *testing.T) {
 	}
 	if !strings.Contains(h.out.String(), "Cluster API and VM Operator objects, pods, services, deployments and events in namespace ns1") {
 		t.Errorf("instructions:\n%s", h.out.String())
+	}
+}
+
+// reaperDeadline reads the tracker directly, so that reactors can call it.
+func reaperDeadline(t *testing.T, fc *fakeCluster) time.Time {
+	t.Helper()
+	obj, err := fc.cs.Tracker().Get(corev1.SchemeGroupVersion.WithResource("namespaces"), "", kube.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := kube.ExpiresAt(obj.(*corev1.Namespace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+func TestRunSetsReaperDeadlineToTheTokenExpiryFromTheServer(t *testing.T) {
+	h := newHarness(t)
+	fc := h.addWorkload("wl1", 30*time.Minute)
+	var atMint time.Time
+	fc.cs.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		atMint = reaperDeadline(t, fc)
+		return false, nil, nil
+	})
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	if !atMint.Equal(now.Add(time.Hour)) {
+		t.Errorf("deadline before minting %v, want setup time + ttl", atMint)
+	}
+	if got := reaperDeadline(t, fc); !got.Equal(now.Add(30 * time.Minute)) {
+		t.Errorf("deadline %v, want token expiry", got)
+	}
+}
+
+func TestRerunKeepsTheDeadlineOfALongerLivedEarlierToken(t *testing.T) {
+	h := newHarness(t)
+	o := h.options(wl1)
+	o.TTL = 2 * time.Hour
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	o.TTL = time.Hour
+	fc := h.clusters["wl1"]
+	var atMint time.Time
+	fc.cs.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		atMint = reaperDeadline(t, fc)
+		return false, nil, nil
+	})
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if got := reaperDeadline(t, fc); !got.Equal(now.Add(2*time.Hour)) || !atMint.Equal(got) {
+		t.Errorf("deadline %v, before minting %v", got, atMint)
+	}
+	later := now.Add(90 * time.Minute)
+	o.Now = func() time.Time { return later }
+	fc.cs.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		tr := a.(k8stesting.CreateActionImpl).GetObject().(*authv1.TokenRequest).DeepCopy()
+		tr.Status = authv1.TokenRequestStatus{Token: "t", ExpirationTimestamp: metav1.NewTime(later.Add(time.Hour))}
+		return true, tr, nil
+	})
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if got := reaperDeadline(t, fc); !got.Equal(later.Add(time.Hour)) {
+		t.Errorf("deadline %v, want the new token's expiry", got)
+	}
+}
+
+func TestRunFailsBeforeMintingTokensWhenTheReaperIsNotReady(t *testing.T) {
+	cases := map[string]func(*appsv1.Deployment){
+		"unavailable":     func(d *appsv1.Deployment) { d.Status.AvailableReplicas, d.Status.ReadyReplicas = 0, 0 },
+		"stale status":    func(d *appsv1.Deployment) { d.Generation = 2 },
+		"old pod remains": func(d *appsv1.Deployment) { d.Status.Replicas, d.Status.UpdatedReplicas = 2, 1 },
+		"rolling out":     func(d *appsv1.Deployment) { d.Status.UpdatedReplicas = 0 },
+	}
+	for name, status := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.clusters["wl1"].reaper = status
+			o := h.options(wl1)
+			o.Wait = 20 * time.Millisecond
+			err := Run(context.Background(), o)
+			if err == nil || !strings.Contains(err.Error(), "wl1: reaper not ready after 20ms") || !strings.Contains(err.Error(), "kglance teardown") {
+				t.Fatalf("err %v", err)
+			}
+			if n := len(h.clusters["wl1"].tokenTTLs) + len(h.clusters["mgmt"].tokenTTLs); n != 0 {
+				t.Errorf("minted %d tokens", n)
+			}
+			if _, err := os.Stat(o.KubeconfigPath); !os.IsNotExist(err) {
+				t.Errorf("kubeconfig written: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunWaitsForTheReaper(t *testing.T) {
+	h := newHarness(t)
+	gets := 0
+	h.clusters["wl1"].reaper = func(d *appsv1.Deployment) {
+		if gets++; gets < 3 {
+			d.Status.AvailableReplicas = 0
+		}
+	}
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	if gets != 3 {
+		t.Errorf("reaper checked %d times", gets)
+	}
+}
+
+func TestRunDoesNotWriteKubeconfigWhenArmingTheReaperFails(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	fc.cs.PrependReactor("create", "serviceaccounts", func(k8stesting.Action) (bool, runtime.Object, error) {
+		fc.cs.PrependReactor("patch", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("webhook down")
+		})
+		return false, nil, nil
+	})
+	o := h.options(wl1)
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "wl1: set reaper deadline") || !strings.Contains(err.Error(), "webhook down") {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := os.Stat(o.KubeconfigPath); !os.IsNotExist(err) {
+		t.Errorf("kubeconfig written: %v", err)
+	}
+}
+
+func TestRunReplacesClusterObjectsOwnedByAnEarlierNamespace(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	managed := map[string]string{kube.ManagedByLabel: kube.ManagedByValue}
+	stale := []metav1.OwnerReference{{APIVersion: "v1", Kind: "Namespace", Name: kube.Namespace, UID: "gone"}}
+	for _, obj := range []runtime.Object{
+		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, UID: "cr-1", Labels: managed, OwnerReferences: stale}},
+		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, UID: "crb-1", Labels: managed, OwnerReferences: stale}},
+		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "kglance-collector", UID: "cr-2", Labels: managed}},
+		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", UID: "cr-3", OwnerReferences: stale}},
+	} {
+		fc.cs.Tracker().Add(obj)
+	}
+	var deleted []string
+	for _, res := range []string{"clusterroles", "clusterrolebindings"} {
+		fc.cs.PrependReactor("delete", res, func(a k8stesting.Action) (bool, runtime.Object, error) {
+			d := a.(k8stesting.DeleteActionImpl)
+			if p := d.DeleteOptions.Preconditions; p == nil || p.UID == nil {
+				t.Errorf("delete %s without UID precondition", d.Name)
+			} else {
+				deleted = append(deleted, res+"/"+d.Name+"/"+string(*p.UID))
+			}
+			return false, nil, nil
+		})
+	}
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"clusterrolebindings/kglance-agent-view/crb-1", "clusterroles/kglance-agent-view/cr-1"}
+	if !slices.Equal(deleted, want) {
+		t.Errorf("deleted %v, want %v", deleted, want)
+	}
+	for _, name := range []string{kube.AgentViewRole, "kglance-collector"} {
+		cr, err := fc.cs.RbacV1().ClusterRoles().Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil || len(cr.OwnerReferences) != 1 || cr.OwnerReferences[0].UID != "ns-uid-1" {
+			t.Errorf("%s: %+v %v", name, cr, err)
+		}
+	}
+}
+
+func TestRerunKeepsClusterObjectsOwnedByTheCurrentNamespace(t *testing.T) {
+	h := newHarness(t)
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	fc := h.clusters["wl1"]
+	fc.cs.ClearActions()
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range fc.cs.Actions() {
+		if a.GetVerb() == "delete" {
+			t.Errorf("deleted %s", a.GetResource().Resource)
+		}
+	}
+}
+
+func TestRunToleratesGarbageCollectionDeletingStaleObjectsFirst(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	managed := map[string]string{kube.ManagedByLabel: kube.ManagedByValue}
+	stale := []metav1.OwnerReference{{APIVersion: "v1", Kind: "Namespace", Name: kube.Namespace, UID: "gone"}}
+	fc.cs.Tracker().Add(&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: managed, OwnerReferences: stale}})
+	fc.cs.Tracker().Add(&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: managed, OwnerReferences: stale}})
+	fc.cs.PrependReactor("delete", "clusterroles", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(rbacv1.Resource("clusterroles"), kube.AgentViewRole)
+	})
+	fc.cs.PrependReactor("delete", "clusterrolebindings", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(rbacv1.Resource("clusterrolebindings"), kube.AgentViewRole, errors.New("uid changed"))
+	})
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunFailsWhenStaleObjectsCannotBeRemoved(t *testing.T) {
+	stale := []metav1.OwnerReference{{APIVersion: "v1", Kind: "Namespace", Name: kube.Namespace, UID: "gone"}}
+	managed := map[string]string{kube.ManagedByLabel: kube.ManagedByValue}
+	for _, res := range []string{"clusterroles", "clusterrolebindings"} {
+		for _, verb := range []string{"list", "delete"} {
+			t.Run(verb+" "+res, func(t *testing.T) {
+				h := newHarness(t)
+				fc := h.clusters["wl1"]
+				fc.cs.Tracker().Add(&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: managed, OwnerReferences: stale}})
+				fc.cs.Tracker().Add(&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: managed, OwnerReferences: stale}})
+				fc.cs.PrependReactor(verb, res, func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, errors.New("denied")
+				})
+				if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "denied") {
+					t.Fatalf("err %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestRunFailsWhenTheReaperCannotBeRead(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	fc.cs.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if _, err := fc.cs.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("daemonsets"), kube.Namespace, kube.CollectorDS); err != nil {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("timeout")
+	})
+	if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "wl1: timeout") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestRunIgnoresADeadlineNoTokenCouldHave(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	ns := kube.NamespaceObject(now.Add(MaxTTL + time.Second))
+	ns.UID = "ns-uid-0"
+	fc.cs.Tracker().Add(ns)
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	if got := reaperDeadline(t, fc); !got.Equal(now.Add(time.Hour)) {
+		t.Errorf("deadline %v", got)
 	}
 }

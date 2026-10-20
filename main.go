@@ -15,6 +15,7 @@ import (
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/collector"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
+	"github.com/rosenhouse-bot-sandbox/kglance/internal/reaper"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/setup"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/teardown"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/version"
@@ -39,6 +40,8 @@ const setupHelp = `usage: kglance setup --mgmt-namespace namespace [--context co
 Creates read-only service accounts on each cluster, starts the socket collector on
 workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
+When the tokens expire, each workload cluster deletes the kglance namespace,
+which removes everything setup created there. Teardown is still needed for the management cluster.
 
 --context, or the current context by default, names the Cluster API management cluster.
 Setup changes only the existing namespace --mgmt-namespace on it. There the agent can read
@@ -60,7 +63,10 @@ Teardown then removes objects labelled app.kubernetes.io/managed-by=kglance from
 flags:
 `
 
-var collect = collector.Main
+var (
+	collect = collector.Main
+	reap    = reaper.Main
+)
 
 // errUsage marks errors that already printed usage.
 var errUsage = errors.New("usage")
@@ -104,6 +110,8 @@ func run(args []string, out, errOut io.Writer) int {
 		}
 	case "collect":
 		err = collect(ctx, args[1:])
+	case "reap":
+		err = reap(ctx, args[1:])
 	case "version", "--version":
 		fmt.Fprint(out, versionInfo())
 		return 0
@@ -175,10 +183,10 @@ func parseSetup(args []string, errOut io.Writer) (setup.Options, string, error) 
 	fs.StringVar(&o.KubeconfigPath, "output", "agent.kubeconfig", "agent kubeconfig path")
 	fs.StringVar(&o.KubeconfigPath, "o", "agent.kubeconfig", "shorthand for --output")
 	fs.StringVar(&o.StatePath, "state", "kglance.state.json", "state file path")
-	fs.StringVar(&o.Image, "image", version.Image(), "collector image")
+	fs.StringVar(&o.Image, "image", version.Image(), "collector and reaper image")
 	fs.DurationVar(&o.Interval, "interval", time.Minute, "socket snapshot interval")
 	fs.StringVar(&o.InstructionsPath, "instructions", "", "also write agent instructions to this file")
-	fs.DurationVar(&o.Wait, "wait", 2*time.Minute, "how long to wait for collector pods to become ready")
+	fs.DurationVar(&o.Wait, "wait", 2*time.Minute, "how long to wait for reaper and collector pods to become ready")
 	fs.StringVar(&kubeconfig, "kubeconfig", "", "admin kubeconfig (default $KUBECONFIG or ~/.kube/config)")
 	if err := parse(fs, args); err != nil {
 		return o, "", err

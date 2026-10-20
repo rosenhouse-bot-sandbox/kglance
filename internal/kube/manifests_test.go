@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestFilterViewRulesDropsDangerousSubresourcesSecretsAndWriteVerbs(t *testing.T) {
@@ -149,9 +152,106 @@ func TestBindingsTargetServiceAccountInNamespace(t *testing.T) {
 }
 
 func TestWorkloadNamespaceAllowsPrivilegedPods(t *testing.T) {
-	ns := NamespaceObject()
+	ns := NamespaceObject(time.Now())
 	if ns.Name != Namespace || ns.Labels["pod-security.kubernetes.io/enforce"] != "privileged" {
 		t.Errorf("%+v", ns)
+	}
+}
+
+func TestWorkloadNamespaceRecordsDeadlineInUTC(t *testing.T) {
+	at := time.Date(2026, 10, 19, 14, 5, 6, 0, time.FixedZone("PDT", -7*3600))
+	ns := NamespaceObject(at)
+	if got := ns.Annotations[ExpiresAtAnnotation]; got != "2026-10-19T21:05:06Z" {
+		t.Errorf("annotation %q", got)
+	}
+	if got, err := ExpiresAt(ns); err != nil || !got.Equal(at) {
+		t.Errorf("ExpiresAt %v %v", got, err)
+	}
+}
+
+func TestReaperRoleDeletesOnlyItsNamespace(t *testing.T) {
+	r := ReaperRole()
+	want := []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"namespaces"}, ResourceNames: []string{Namespace}, Verbs: []string{"get", "delete"}}}
+	if r.Namespace != Namespace || !equality.Semantic.DeepEqual(r.Rules, want) {
+		t.Errorf("%s %+v", r.Namespace, r.Rules)
+	}
+	for _, o := range WorkloadObjects(&corev1.Namespace{}, nil, DaemonSetOptions{Image: "i", Interval: time.Minute}) {
+		if rb, ok := o.(*rbacv1.RoleBinding); ok && rb.Name == r.Name {
+			if rb.RoleRef.Name != r.Name || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: ReaperSA, Namespace: Namespace}) {
+				t.Errorf("binding %+v", rb)
+			}
+			return
+		}
+	}
+	t.Error("no reaper RoleBinding")
+}
+
+func TestReaperContract(t *testing.T) {
+	d := Reaper("img:1")
+	if d.Name != ReaperDeployment || d.Namespace != Namespace || *d.Spec.Replicas != 1 || d.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatalf("%s/%s %+v", d.Namespace, d.Name, d.Spec)
+	}
+	if d.Spec.Selector.MatchLabels[NameLabel] != ReaperDeployment || d.Spec.Template.Labels[NameLabel] != ReaperDeployment {
+		t.Error("selector")
+	}
+	p := d.Spec.Template.Spec
+	if p.HostNetwork || p.HostPID || p.HostIPC || len(p.Volumes) != 0 {
+		t.Error("host namespaces or volumes")
+	}
+	if p.ServiceAccountName != ReaperSA || p.AutomountServiceAccountToken == nil || !*p.AutomountServiceAccountToken {
+		t.Error("service account")
+	}
+	if len(p.Tolerations) != 1 || p.Tolerations[0] != (corev1.Toleration{Key: ControlPlaneLabel, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}) {
+		t.Errorf("tolerations %+v", p.Tolerations)
+	}
+	psc := p.SecurityContext
+	if psc == nil || psc.RunAsNonRoot == nil || !*psc.RunAsNonRoot || psc.RunAsUser == nil || *psc.RunAsUser == 0 ||
+		psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod security context %+v", psc)
+	}
+	if len(p.Containers) != 1 {
+		t.Fatal("containers")
+	}
+	c := p.Containers[0]
+	if c.Image != "img:1" || c.ImagePullPolicy != corev1.PullIfNotPresent || !slices.Equal(c.Args, []string{"reap"}) {
+		t.Errorf("container %s %s %v", c.Image, c.ImagePullPolicy, c.Args)
+	}
+	sc := c.SecurityContext
+	if sc == nil || sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||
+		sc.Capabilities == nil || !slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) || len(sc.Capabilities.Add) != 0 ||
+		(sc.Privileged != nil && *sc.Privileged) || sc.RunAsUser != nil {
+		t.Errorf("security context %+v", sc)
+	}
+	if c.StartupProbe == nil || c.StartupProbe.Exec == nil || !slices.Equal(c.StartupProbe.Exec.Command, []string{"/kglance", "reap", "--check"}) {
+		t.Errorf("startup probe %+v", c.StartupProbe)
+	}
+	if c.Resources.Limits.Memory().IsZero() || c.Resources.Requests.Cpu().IsZero() {
+		t.Error("resources")
+	}
+	if got := Reaper("img").Spec.Template.Spec.Containers[0].ImagePullPolicy; got != corev1.PullAlways {
+		t.Errorf("untagged image pull policy %s", got)
+	}
+}
+
+func TestWorkloadClusterScopedObjectsAreOwnedByTheNamespace(t *testing.T) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: Namespace, UID: "ns-uid"}}
+	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "Namespace", Name: Namespace, UID: "ns-uid"}
+	clusterScoped := 0
+	for _, o := range WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}) {
+		refs := o.GetOwnerReferences()
+		if o.GetNamespace() != "" {
+			if len(refs) != 0 {
+				t.Errorf("%T %s: owners %+v", o, o.GetName(), refs)
+			}
+			continue
+		}
+		clusterScoped++
+		if len(refs) != 1 || refs[0] != owner {
+			t.Errorf("%T %s: owners %+v", o, o.GetName(), refs)
+		}
+	}
+	if clusterScoped != 4 {
+		t.Errorf("%d cluster-scoped objects", clusterScoped)
 	}
 }
 
@@ -218,7 +318,7 @@ func TestDaemonSetContract(t *testing.T) {
 func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 	sets := map[string][]Object{
 		"mgmt":     MgmtObjects("team"),
-		"workload": WorkloadObjects(nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}),
+		"workload": append([]Object{NamespaceObject(time.Now())}, WorkloadObjects(&corev1.Namespace{}, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})...),
 	}
 	for name, objs := range sets {
 		for _, o := range objs {
@@ -241,7 +341,9 @@ func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 	if got := kinds(sets["mgmt"]); !slices.Equal(got, wantMgmt) {
 		t.Errorf("mgmt %v", got)
 	}
-	wantWl := []string{"Namespace/kglance", "ServiceAccount/kglance-agent", "ServiceAccount/kglance-collector",
+	wantWl := []string{"Namespace/kglance",
+		"ServiceAccount/kglance-reaper", "Role/kglance-reaper", "RoleBinding/kglance-reaper", "Deployment/kglance-reaper",
+		"ServiceAccount/kglance-agent", "ServiceAccount/kglance-collector",
 		"ClusterRole/kglance-agent-view", "ClusterRoleBinding/kglance-agent-view", "Role/kglance-agent", "RoleBinding/kglance-agent",
 		"ClusterRole/kglance-collector", "ClusterRoleBinding/kglance-collector", "Role/kglance-collector", "RoleBinding/kglance-collector",
 		"DaemonSet/kglance-collector"}

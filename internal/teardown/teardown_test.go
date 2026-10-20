@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -73,7 +74,8 @@ func newHarness(t *testing.T, names ...string) *harness {
 		h.clusters[name] = fc
 		rec := state.Cluster{Name: name, Role: state.RoleWorkload, Context: "mgmt-ctx", ClusterRef: "ns1/" + name, Server: fc.server}
 		rec.CAFingerprint, _ = state.Fingerprint(fc.ca)
-		for _, o := range kube.WorkloadObjects(nil, kube.DaemonSetOptions{Image: "i", Interval: time.Minute}) {
+		ns := kube.NamespaceObject(time.Now())
+		for _, o := range append([]kube.Object{ns}, kube.WorkloadObjects(ns, nil, kube.DaemonSetOptions{Image: "i", Interval: time.Minute})...) {
 			if err := kube.Apply(context.Background(), fc.cs, o); err != nil {
 				t.Fatal(err)
 			}
@@ -156,16 +158,17 @@ func installed(t *testing.T, cs *fake.Clientset) bool {
 	_, crbErr := cs.RbacV1().ClusterRoleBindings().Get(ctx, kube.AgentViewRole, metav1.GetOptions{})
 	_, saErr := cs.CoreV1().ServiceAccounts(kube.Namespace).Get(ctx, kube.AgentSA, metav1.GetOptions{})
 	_, nsErr := cs.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
-	errs := []error{dsErr, crErr, crbErr, saErr, nsErr}
+	_, reaperErr := cs.AppsV1().Deployments(kube.Namespace).Get(ctx, kube.ReaperDeployment, metav1.GetOptions{})
+	errs := []error{dsErr, crErr, crbErr, saErr, nsErr, reaperErr}
 	for _, err := range errs {
 		if err != nil && !apierrors.IsNotFound(err) {
 			t.Fatal(err)
 		}
 	}
-	if dsErr == nil && crErr == nil && crbErr == nil && saErr == nil && nsErr == nil {
+	if !slices.ContainsFunc(errs, func(err error) bool { return err != nil }) {
 		return true
 	}
-	if apierrors.IsNotFound(dsErr) && apierrors.IsNotFound(crErr) && apierrors.IsNotFound(crbErr) && apierrors.IsNotFound(saErr) && apierrors.IsNotFound(nsErr) {
+	if !slices.ContainsFunc(errs, func(err error) bool { return err == nil }) {
 		return false
 	}
 	t.Fatalf("partially installed: %v", errs)

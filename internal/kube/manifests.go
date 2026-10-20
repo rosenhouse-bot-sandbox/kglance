@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ const (
 	AgentMgmtRole = "kglance-agent-capi"
 	AgentRole     = "kglance-agent"
 	collectorRole = "kglance-collector"
+	reaperRole    = "kglance-reaper"
 )
 
 type Object interface {
@@ -48,11 +50,25 @@ func meta(kind, apiVersion, namespace, name string) (metav1.TypeMeta, metav1.Obj
 		metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{ManagedByLabel: ManagedByValue}}
 }
 
-// NamespaceObject is the workload namespace, which allows the privileged collector.
-func NamespaceObject() *corev1.Namespace {
+// NamespaceObject is the workload namespace, which allows the privileged collector and which the reaper deletes at expiresAt.
+func NamespaceObject(expiresAt time.Time) *corev1.Namespace {
 	tm, om := meta("Namespace", "v1", "", Namespace)
 	om.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
+	om.Annotations = map[string]string{ExpiresAtAnnotation: expiresAt.UTC().Format(time.RFC3339)}
 	return &corev1.Namespace{TypeMeta: tm, ObjectMeta: om}
+}
+
+// ExpiresAt returns the time at which the reaper deletes ns.
+func ExpiresAt(ns *corev1.Namespace) (time.Time, error) {
+	v, ok := ns.Annotations[ExpiresAtAnnotation]
+	if !ok {
+		return time.Time{}, fmt.Errorf("namespace %s has no %s annotation", ns.Name, ExpiresAtAnnotation)
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("namespace %s: annotation %s: %w", ns.Name, ExpiresAtAnnotation, err)
+	}
+	return t, nil
 }
 
 func ServiceAccount(ns, name string) *corev1.ServiceAccount {
@@ -149,6 +165,14 @@ func CollectorRole() *rbacv1.Role {
 	})
 }
 
+// ReaperRole lets the reaper read and delete only the namespace it runs in.
+// A Role suffices because the API server authorizes requests for a namespace object within that namespace.
+func ReaperRole() *rbacv1.Role {
+	return role(Namespace, reaperRole, []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"namespaces"}, ResourceNames: []string{Namespace}, Verbs: []string{"get", "delete"}},
+	})
+}
+
 type DaemonSetOptions struct {
 	Image    string
 	Cluster  string
@@ -212,6 +236,57 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 	}}
 }
 
+// Reaper runs "kglance reap", which deletes the namespace at its deadline.
+// Its startup probe dry-runs that delete, so the pod becomes ready only if the delete would succeed.
+func Reaper(image string) *appsv1.Deployment {
+	tm, om := meta("Deployment", "apps/v1", Namespace, ReaperDeployment)
+	podLabels := map[string]string{NameLabel: ReaperDeployment, ManagedByLabel: ManagedByValue}
+	yes, no := true, false
+	replicas, nonRoot, grace := int32(1), int64(65532), int64(5)
+	return &appsv1.Deployment{TypeMeta: tm, ObjectMeta: om, Spec: appsv1.DeploymentSpec{
+		Replicas: &replicas,
+		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{NameLabel: ReaperDeployment}},
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+			Spec: corev1.PodSpec{
+				ServiceAccountName:            ReaperSA,
+				AutomountServiceAccountToken:  &yes,
+				NodeSelector:                  map[string]string{corev1.LabelOSStable: "linux"},
+				Tolerations:                   []corev1.Toleration{{Key: ControlPlaneLabel, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
+				TerminationGracePeriodSeconds: &grace,
+				SecurityContext: &corev1.PodSecurityContext{
+					RunAsNonRoot:   &yes,
+					RunAsUser:      &nonRoot,
+					RunAsGroup:     &nonRoot,
+					SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				},
+				Containers: []corev1.Container{{
+					Name:            "reaper",
+					Image:           image,
+					ImagePullPolicy: pullPolicy(image),
+					Args:            []string{"reap"},
+					StartupProbe: &corev1.Probe{
+						ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/kglance", "reap", "--check"}}},
+						PeriodSeconds:    2,
+						TimeoutSeconds:   10,
+						FailureThreshold: 30,
+					},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("32Mi")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						ReadOnlyRootFilesystem:   &yes,
+						AllowPrivilegeEscalation: &no,
+						Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+					},
+				}},
+			},
+		},
+	}}
+}
+
 // MgmtObjects grants reads in the existing namespace ns only.
 func MgmtObjects(ns string) []Object {
 	return []Object{
@@ -221,9 +296,14 @@ func MgmtObjects(ns string) []Object {
 	}
 }
 
-func WorkloadObjects(viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Object {
-	return []Object{
-		NamespaceObject(),
+// WorkloadObjects are the objects that setup applies in and around ns.
+// ns owns the cluster-scoped ones, so that deleting it removes everything.
+func WorkloadObjects(ns *corev1.Namespace, viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Object {
+	objs := []Object{
+		ServiceAccount(Namespace, ReaperSA),
+		ReaperRole(),
+		RoleBinding(reaperRole, Namespace, ReaperSA),
+		Reaper(ds.Image),
 		ServiceAccount(Namespace, AgentSA),
 		ServiceAccount(Namespace, CollectorSA),
 		AgentViewClusterRole(viewRules),
@@ -236,4 +316,11 @@ func WorkloadObjects(viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Objec
 		RoleBinding(collectorRole, Namespace, CollectorSA),
 		DaemonSet(ds),
 	}
+	owner := []metav1.OwnerReference{{APIVersion: "v1", Kind: "Namespace", Name: ns.Name, UID: ns.UID}}
+	for _, o := range objs {
+		if o.GetNamespace() == "" {
+			o.SetOwnerReferences(owner)
+		}
+	}
+	return objs
 }

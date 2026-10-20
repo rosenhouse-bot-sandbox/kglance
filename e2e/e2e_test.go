@@ -13,6 +13,7 @@ package e2e
 import (
 	"bytes"
 	"cmp"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -27,8 +28,9 @@ import (
 )
 
 const (
-	listenerNS   = "kglance-e2e"
-	listenerPort = "18080"
+	listenerNS          = "kglance-e2e"
+	listenerPort        = "18080"
+	expiresAtAnnotation = "kglance.rosenhouse-bot-sandbox.github.io/expires-at"
 )
 
 var rowFields = []string{"cluster", "node", "role", "ts", "netns", "proto", "local", "peer", "state", "pid", "process", "pod", "container"}
@@ -131,6 +133,56 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 			}
 		}
 		e.allowed(t, agentKC, "wl1", "get", "pods", "-A")
+	})
+
+	t.Run("reaper", func(t *testing.T) {
+		reaper := "system:serviceaccount:kglance:kglance-reaper"
+		// Impersonate rather than ask a SubjectAccessReview, which would not see the namespaced grant.
+		if _, err := run([]string{"--context", e.wlCtx, "--as", reaper, "delete", "namespace", "kglance", "--dry-run=server"}); err != nil {
+			t.Errorf("reaper cannot delete its namespace: %v", err)
+		}
+		for _, args := range [][]string{
+			{"delete", "namespace", listenerNS, "--dry-run=server"},
+			{"get", "namespaces"},
+			{"-n", "kglance", "delete", "daemonset", "kglance-collector", "--dry-run=server"},
+			{"-n", "kglance", "get", "secrets"},
+		} {
+			_, err := run(append([]string{"--context", e.wlCtx, "--as", reaper}, args...))
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "forbidden") {
+				t.Errorf("reaper %v: want Forbidden, got %v", args, err)
+			}
+		}
+		if got, want := e.reaperDeadline(), tokenExpiry(t, agentKC, "wl1"); !got.Equal(want) {
+			t.Errorf("reaper deadline %v, token expiry %v", got, want)
+		}
+	})
+
+	t.Run("reap at expiry", func(t *testing.T) {
+		reapedKC := e.copyFile(agentKC)
+		e.mustAdmin(e.wlCtx, "annotate", "--overwrite", "namespace", "kglance", expiresAtAnnotation+"=2000-01-01T00:00:00Z")
+		e.waitGone(e.wlCtx, "namespace", "kglance")
+		for _, kind := range []string{"clusterroles", "clusterrolebindings"} {
+			e.waitGone(e.wlCtx, kind, "-l", "app.kubernetes.io/managed-by=kglance")
+		}
+		e.waitUnauthorized(reapedKC, "wl1")
+		e.allowed(t, reapedKC, "mgmt", "-n", listenerNS, "get", "clusters.cluster.x-k8s.io")
+	})
+
+	t.Run("setup after reap", func(t *testing.T) {
+		e.mustKglance("setup", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1",
+			"--ttl", "1h", "-o", "agent.kubeconfig", "--image", e.image, "--interval", "5s")
+		uid := e.mustAdmin(e.wlCtx, "get", "namespace", "kglance", "-o", "jsonpath={.metadata.uid}")
+		// Garbage collection of the earlier namespace's objects must not remove the new ones.
+		for range 5 {
+			for _, kind := range []string{"clusterroles", "clusterrolebindings"} {
+				owners := e.mustAdmin(e.wlCtx, "get", kind, "-l", "app.kubernetes.io/managed-by=kglance", "-o", "jsonpath={.items[*].metadata.ownerReferences[*].uid}")
+				if got := strings.Fields(owners); len(got) != 2 || got[0] != uid || got[1] != uid {
+					t.Fatalf("%s owners %v, namespace %s", kind, got, uid)
+				}
+			}
+			e.allowed(t, agentKC, "wl1", "get", "pods", "-A")
+			time.Sleep(2 * time.Second)
+		}
 	})
 
 	t.Run("teardown", func(t *testing.T) {
@@ -365,15 +417,16 @@ func (e *env) dsGeneration() string {
 	return e.mustAdmin(e.wlCtx, "-n", "kglance", "get", "daemonset", "kglance-collector", "-o", "jsonpath={.metadata.generation}")
 }
 
-func (e *env) waitGone(ctx, kind, name string) {
+// waitGone waits until "kubectl get kind selector..." finds nothing.
+func (e *env) waitGone(ctx, kind string, selector ...string) {
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		out := e.admin(ctx, "get", kind, name, "--ignore-not-found", "-o", "name")
+		out := e.admin(ctx, append(append([]string{"get", kind}, selector...), "--ignore-not-found", "-o", "name")...)
 		if out == "" {
 			return
 		}
 		if time.Now().After(deadline) {
-			e.t.Errorf("%s: %s/%s still exists", ctx, kind, name)
+			e.t.Errorf("%s: still exists: %s", ctx, out)
 			return
 		}
 		time.Sleep(2 * time.Second)
@@ -393,6 +446,32 @@ func (e *env) waitUnauthorized(kubeconfig, ctx string) {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+func (e *env) reaperDeadline() time.Time {
+	v := e.mustAdmin(e.wlCtx, "get", "namespace", "kglance", "-o", "go-template={{index .metadata.annotations \""+expiresAtAnnotation+"\"}}")
+	at, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return at
+}
+
+// tokenExpiry reads the exp claim of the token for ctx.
+func tokenExpiry(t *testing.T, kubeconfig, ctx string) time.Time {
+	parts := strings.Split(token(t, kubeconfig, ctx), ".")
+	if len(parts) != 3 {
+		t.Fatalf("%s token is not a JWT", ctx)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims struct{ Exp int64 }
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatal(err)
+	}
+	return time.Unix(claims.Exp, 0)
 }
 
 func token(t *testing.T, kubeconfig, ctx string) string {
