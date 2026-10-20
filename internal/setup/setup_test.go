@@ -22,6 +22,7 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	appsv1 "k8s.io/api/apps/v1"
 	authv1 "k8s.io/api/authentication/v1"
+	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -54,6 +55,9 @@ type fakeCluster struct {
 	ready     bool
 	stale     bool
 	status    func(*appsv1.DaemonSetStatus)
+	// deny refuses the access reviews it matches; nil allows all.
+	deny    func(authzv1.ResourceAttributes) bool
+	reviews []authzv1.ResourceAttributes
 }
 
 func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCluster {
@@ -83,6 +87,12 @@ func newFakeCluster(t *testing.T, server string, tokenCap time.Duration) *fakeCl
 		}
 		tr.Status = authv1.TokenRequestStatus{Token: "tok-" + server, ExpirationTimestamp: metav1.NewTime(now.Add(ttl))}
 		return true, tr, nil
+	})
+	cs.PrependReactor("create", "selfsubjectaccessreviews", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		r := a.(k8stesting.CreateAction).GetObject().(*authzv1.SelfSubjectAccessReview).DeepCopy()
+		fc.reviews = append(fc.reviews, *r.Spec.ResourceAttributes)
+		r.Status.Allowed = fc.deny == nil || !fc.deny(*r.Spec.ResourceAttributes)
+		return true, r, nil
 	})
 	cs.PrependReactor("get", "daemonsets", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		obj, err := cs.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("daemonsets"), kube.Namespace, kube.CollectorDS)
@@ -582,9 +592,9 @@ func TestRerunFailureKeepsPreviouslyRecordedObjects(t *testing.T) {
 
 func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 	cases := map[string]metav1.Object{
-		"Namespace kglance":              &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace}},
-		"ClusterRole kglance-agent-view": &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: map[string]string{"x": "y"}}},
-		"DaemonSet kglance-collector":    &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: kube.CollectorDS, Namespace: kube.Namespace}},
+		"Namespace kglance":                   &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: kube.Namespace}},
+		"ClusterRole kglance-agent-view":      &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: kube.AgentViewRole, Labels: map[string]string{"x": "y"}}},
+		"DaemonSet kglance/kglance-collector": &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: kube.CollectorDS, Namespace: kube.Namespace}},
 	}
 	for name, existing := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -592,7 +602,7 @@ func TestRunRefusesToAdoptObjectsNotManagedByKglance(t *testing.T) {
 			fc := h.clusters["wl1"]
 			fc.cs.Tracker().Add(existing.(runtime.Object))
 			err := Run(context.Background(), h.options(wl1))
-			if err == nil || !strings.Contains(err.Error(), name+" exists and is not managed by kglance") {
+			if err == nil || !strings.Contains(err.Error(), "wl1: apply "+name+": exists and is not managed by kglance") {
 				t.Fatalf("err %v", err)
 			}
 			if appliedNothing := name == "Namespace kglance"; appliedNothing == strings.Contains(err.Error(), "teardown") {

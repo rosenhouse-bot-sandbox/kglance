@@ -55,7 +55,18 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 	})
 	e.startListener()
 
-	out := e.mustKglance("setup", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1",
+	out := e.mustKglance("setup", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1", "--image", e.image, "--dry-run")
+	if !strings.Contains(out, "wl1: apply DaemonSet kglance/kglance-collector: ok\n") || !strings.Contains(out, "dry run passed") {
+		t.Errorf("dry run output:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "kglance.state.json")); !os.IsNotExist(err) {
+		t.Errorf("dry run wrote state: %v", err)
+	}
+	if out := e.admin(e.mgmtCtx, "-n", listenerNS, "get", "serviceaccount", "kglance-agent", "--ignore-not-found", "-o", "name"); out != "" {
+		t.Errorf("dry run created %s", out)
+	}
+
+	out = e.mustKglance("setup", "--context", e.mgmtCtx, "--mgmt-namespace", listenerNS, "--workload", "wl1",
 		"--ttl", "1h", "-o", "agent.kubeconfig", "--image", e.image, "--interval", "5s")
 	nodes := e.nodes()
 	cp := 0
@@ -97,6 +108,15 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 		e.forbidden(t, agentKC, "wl1", "-n", listenerNS, "delete", "pod", "listener")
 		e.forbidden(t, agentKC, "wl1", "get", "secrets", "-A")
 		e.forbidden(t, agentKC, "wl1", "-n", "kglance", "create", "configmap", "x")
+	})
+
+	t.Run("dry run as the agent", func(t *testing.T) {
+		out, err := e.kglance("setup", "--kubeconfig", agentKC, "--context", "mgmt", "--mgmt-namespace", listenerNS,
+			"--state", filepath.Join(t.TempDir(), "state.json"), "-o", filepath.Join(t.TempDir(), "kubeconfig"), "--dry-run")
+		want := "mgmt: apply ServiceAccount " + listenerNS + "/kglance-agent: denied: get,create,patch serviceaccounts/kglance-agent -n " + listenerNS + "\n"
+		if err == nil || !strings.Contains(out, want) || !strings.Contains(out, "dry run: 4 of 4 steps would fail") {
+			t.Errorf("err %v; want %q in:\n%s", err, want, out)
+		}
 	})
 
 	t.Run("snapshots", func(t *testing.T) {

@@ -48,6 +48,9 @@ Setup reaches that cluster with the admin kubeconfig in the Cluster's <cluster>-
 The agent kubeconfig has a context "mgmt" and one context per workload, named after the
 Cluster unless name= is given.
 
+--dry-run checks RBAC only. Admission control, such as webhooks or Pod Security,
+can still reject the real run.
+
 flags:
 `
 
@@ -180,6 +183,7 @@ func parseSetup(args []string, errOut io.Writer) (setup.Options, string, error) 
 	fs.StringVar(&o.InstructionsPath, "instructions", "", "also write agent instructions to this file")
 	fs.DurationVar(&o.Wait, "wait", 2*time.Minute, "how long to wait for collector pods to become ready")
 	fs.StringVar(&kubeconfig, "kubeconfig", "", "admin kubeconfig (default $KUBECONFIG or ~/.kube/config)")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "print each step setup would take and whether RBAC allows it; change nothing")
 	if err := parse(fs, args); err != nil {
 		return o, "", err
 	}
