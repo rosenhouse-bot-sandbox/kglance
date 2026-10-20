@@ -296,14 +296,20 @@ func MgmtObjects(ns string) []Object {
 	}
 }
 
-// WorkloadObjects are the objects that setup applies in and around ns.
-// ns owns the cluster-scoped ones, so that deleting it removes everything.
-func WorkloadObjects(ns *corev1.Namespace, viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Object {
-	objs := []Object{
+// ReaperObjects run the reaper in the workload namespace.
+func ReaperObjects(image string) []Object {
+	return []Object{
 		ServiceAccount(Namespace, ReaperSA),
 		ReaperRole(),
 		RoleBinding(reaperRole, Namespace, ReaperSA),
-		Reaper(ds.Image),
+		Reaper(image),
+	}
+}
+
+// WorkloadObjects give the agent access and run the collector.
+// ns owns the cluster-scoped ones, so that deleting ns removes them.
+func WorkloadObjects(ns *corev1.Namespace, viewRules []rbacv1.PolicyRule, ds DaemonSetOptions) []Object {
+	objs := []Object{
 		ServiceAccount(Namespace, AgentSA),
 		ServiceAccount(Namespace, CollectorSA),
 		AgentViewClusterRole(viewRules),

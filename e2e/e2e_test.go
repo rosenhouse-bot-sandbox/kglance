@@ -161,9 +161,8 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 		reapedKC := e.copyFile(agentKC)
 		e.mustAdmin(e.wlCtx, "annotate", "--overwrite", "namespace", "kglance", expiresAtAnnotation+"=2000-01-01T00:00:00Z")
 		e.waitGone(e.wlCtx, "namespace", "kglance")
-		for _, kind := range []string{"clusterroles", "clusterrolebindings"} {
-			e.waitGone(e.wlCtx, kind, "-l", "app.kubernetes.io/managed-by=kglance")
-		}
+		// Leave the ClusterRoles to garbage collection, which may race the next setup.
+		e.waitGone(e.wlCtx, "clusterrolebindings", "-l", "app.kubernetes.io/managed-by=kglance")
 		e.waitUnauthorized(reapedKC, "wl1")
 		e.allowed(t, reapedKC, "mgmt", "-n", listenerNS, "get", "clusters.cluster.x-k8s.io")
 	})
@@ -186,7 +185,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 	})
 
 	t.Run("teardown", func(t *testing.T) {
-		secondKC := e.copyFile(agentKC)
+		lastKC := e.copyFile(agentKC)
 		out := e.mustKglance("teardown")
 		if !regexp.MustCompile(`read \S*kglance\.state\.json: removing kglance from mgmt, wl1 \.\.\. done`).MatchString(out) {
 			t.Errorf("teardown output:\n%s", out)
@@ -207,7 +206,7 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 		if out := e.admin(e.mgmtCtx, "-n", listenerNS, "get", "serviceaccounts,roles,rolebindings", "-l", "app.kubernetes.io/managed-by=kglance", "-o", "name"); out != "" {
 			t.Errorf("mgmt: leftover objects:\n%s", out)
 		}
-		for _, kc := range []string{firstKC, secondKC} {
+		for _, kc := range []string{firstKC, lastKC} {
 			for _, ctx := range []string{"mgmt", "wl1"} {
 				e.waitUnauthorized(kc, ctx)
 			}
@@ -417,11 +416,11 @@ func (e *env) dsGeneration() string {
 	return e.mustAdmin(e.wlCtx, "-n", "kglance", "get", "daemonset", "kglance-collector", "-o", "jsonpath={.metadata.generation}")
 }
 
-// waitGone waits until "kubectl get kind selector..." finds nothing.
-func (e *env) waitGone(ctx, kind string, selector ...string) {
+// waitGone waits until "kubectl get kind args..." finds nothing.
+func (e *env) waitGone(ctx, kind string, args ...string) {
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		out := e.admin(ctx, append(append([]string{"get", kind}, selector...), "--ignore-not-found", "-o", "name")...)
+		out := e.admin(ctx, append(append([]string{"get", kind}, args...), "--ignore-not-found", "-o", "name")...)
 		if out == "" {
 			return
 		}

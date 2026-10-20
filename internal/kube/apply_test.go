@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestApplyCreatesAndReappliesEveryWorkloadObject(t *testing.T) {
 
 func allWorkloadObjects() []Object {
 	ns := NamespaceObject(time.Now())
-	return append([]Object{ns}, WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})...)
+	return slices.Concat([]Object{ns}, ReaperObjects("i"), WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}))
 }
 
 func TestApplyUpdatesChangedSpec(t *testing.T) {

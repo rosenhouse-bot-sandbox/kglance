@@ -175,7 +175,7 @@ func TestReaperRoleDeletesOnlyItsNamespace(t *testing.T) {
 	if r.Namespace != Namespace || !equality.Semantic.DeepEqual(r.Rules, want) {
 		t.Errorf("%s %+v", r.Namespace, r.Rules)
 	}
-	for _, o := range WorkloadObjects(&corev1.Namespace{}, nil, DaemonSetOptions{Image: "i", Interval: time.Minute}) {
+	for _, o := range ReaperObjects("i") {
 		if rb, ok := o.(*rbacv1.RoleBinding); ok && rb.Name == r.Name {
 			if rb.RoleRef.Name != r.Name || rb.Subjects[0] != (rbacv1.Subject{Kind: "ServiceAccount", Name: ReaperSA, Namespace: Namespace}) {
 				t.Errorf("binding %+v", rb)
@@ -237,7 +237,7 @@ func TestWorkloadClusterScopedObjectsAreOwnedByTheNamespace(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: Namespace, UID: "ns-uid"}}
 	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "Namespace", Name: Namespace, UID: "ns-uid"}
 	clusterScoped := 0
-	for _, o := range WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}) {
+	for _, o := range slices.Concat(ReaperObjects("i"), WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})) {
 		refs := o.GetOwnerReferences()
 		if o.GetNamespace() != "" {
 			if len(refs) != 0 {
@@ -317,8 +317,9 @@ func TestDaemonSetContract(t *testing.T) {
 
 func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 	sets := map[string][]Object{
-		"mgmt":     MgmtObjects("team"),
-		"workload": append([]Object{NamespaceObject(time.Now())}, WorkloadObjects(&corev1.Namespace{}, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})...),
+		"mgmt": MgmtObjects("team"),
+		"workload": slices.Concat([]Object{NamespaceObject(time.Now())}, ReaperObjects("i"),
+			WorkloadObjects(&corev1.Namespace{}, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})),
 	}
 	for name, objs := range sets {
 		for _, o := range objs {

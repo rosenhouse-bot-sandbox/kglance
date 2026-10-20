@@ -3,15 +3,12 @@ package setup
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	appsv1 "k8s.io/api/apps/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 func later(a, b time.Time) time.Time {
@@ -21,7 +18,7 @@ func later(a, b time.Time) time.Time {
 	return b
 }
 
-func available(d *appsv1.Deployment) bool {
+func reaperRolledOut(d *appsv1.Deployment) bool {
 	s, want := d.Status, *d.Spec.Replicas
 	return s.ObservedGeneration >= d.Generation && s.Replicas == want && s.UpdatedReplicas == want && s.AvailableReplicas == want
 }
@@ -38,11 +35,11 @@ func waitReapers(ctx context.Context, o Options, clusters []*cluster) error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", c.Name, err)
 			}
-			if available(d) {
+			if reaperRolledOut(d) {
 				break
 			}
 			if time.Now().After(deadline) {
-				return fmt.Errorf("%s: reaper not ready after %v", c.Name, o.Wait)
+				return fmt.Errorf("%s: reaper not ready after %v%s", c.Name, o.Wait, reaperWaiting(ctx, c))
 			}
 			select {
 			case <-ctx.Done():
@@ -67,42 +64,18 @@ func armReapers(ctx context.Context, clusters []*cluster) error {
 	return nil
 }
 
-// deleteObjectsOwnedByEarlierNamespace deletes kglance's cluster-scoped objects that a deleted namespace still owns.
-// Garbage collection would delete them anyway, possibly just after setup re-applies them.
-func deleteObjectsOwnedByEarlierNamespace(ctx context.Context, c *cluster, uid types.UID) error {
-	rbac := c.conn.Client.RbacV1()
-	sel := metav1.ListOptions{LabelSelector: kube.ManagedByLabel + "=" + kube.ManagedByValue}
-	bindings, err := rbac.ClusterRoleBindings().List(ctx, sel)
+// reaperWaiting says why a reaper container is waiting, if one is.
+func reaperWaiting(ctx context.Context, c *cluster) string {
+	pods, err := c.conn.Client.CoreV1().Pods(kube.Namespace).List(ctx, metav1.ListOptions{LabelSelector: kube.NameLabel + "=" + kube.ReaperDeployment})
 	if err != nil {
-		return err
+		return ""
 	}
-	for _, b := range bindings.Items {
-		if err := deleteIfOwnedByEarlierNamespace(ctx, b.ObjectMeta, uid, rbac.ClusterRoleBindings().Delete); err != nil {
-			return err
+	for _, p := range pods.Items {
+		for _, s := range p.Status.ContainerStatuses {
+			if w := s.State.Waiting; w != nil {
+				return fmt.Sprintf("; pod %s is waiting: %s: %s", p.Name, w.Reason, w.Message)
+			}
 		}
 	}
-	roles, err := rbac.ClusterRoles().List(ctx, sel)
-	if err != nil {
-		return err
-	}
-	for _, r := range roles.Items {
-		if err := deleteIfOwnedByEarlierNamespace(ctx, r.ObjectMeta, uid, rbac.ClusterRoles().Delete); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func deleteIfOwnedByEarlierNamespace(ctx context.Context, m metav1.ObjectMeta, uid types.UID, del func(context.Context, string, metav1.DeleteOptions) error) error {
-	earlier := func(r metav1.OwnerReference) bool {
-		return r.Kind == "Namespace" && r.Name == kube.Namespace && r.UID != uid
-	}
-	if !slices.ContainsFunc(m.OwnerReferences, earlier) {
-		return nil
-	}
-	err := del(ctx, m.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &m.UID}})
-	if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
-		return nil
-	}
-	return err
+	return ""
 }

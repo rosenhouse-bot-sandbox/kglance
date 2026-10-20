@@ -75,7 +75,7 @@ func newHarness(t *testing.T, names ...string) *harness {
 		rec := state.Cluster{Name: name, Role: state.RoleWorkload, Context: "mgmt-ctx", ClusterRef: "ns1/" + name, Server: fc.server}
 		rec.CAFingerprint, _ = state.Fingerprint(fc.ca)
 		ns := kube.NamespaceObject(time.Now())
-		for _, o := range append([]kube.Object{ns}, kube.WorkloadObjects(ns, nil, kube.DaemonSetOptions{Image: "i", Interval: time.Minute})...) {
+		for _, o := range slices.Concat([]kube.Object{ns}, kube.ReaperObjects("i"), kube.WorkloadObjects(ns, nil, kube.DaemonSetOptions{Image: "i", Interval: time.Minute})) {
 			if err := kube.Apply(context.Background(), fc.cs, o); err != nil {
 				t.Fatal(err)
 			}

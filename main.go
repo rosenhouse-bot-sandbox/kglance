@@ -40,8 +40,9 @@ const setupHelp = `usage: kglance setup --mgmt-namespace namespace [--context co
 Creates read-only service accounts on each cluster, starts the socket collector on
 workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
-When the tokens expire, each workload cluster deletes the kglance namespace,
-which removes everything setup created there. Teardown is still needed for the management cluster.
+When the tokens expire, each workload cluster deletes everything setup created there,
+including the kglance namespace and all its contents. Teardown is still needed for the
+management cluster.
 
 --context, or the current context by default, names the Cluster API management cluster.
 Setup changes only the existing namespace --mgmt-namespace on it. There the agent can read

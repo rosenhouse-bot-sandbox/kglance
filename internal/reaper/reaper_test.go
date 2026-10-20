@@ -29,12 +29,13 @@ func expiring(at time.Time) *corev1.Namespace {
 	return namespace(map[string]string{kube.ExpiresAtAnnotation: at.Format(time.RFC3339)})
 }
 
-// deletes records namespace deletes; the fake clientset ignores DeleteOptions.
-func deletes(cs *fake.Clientset) *[]metav1.DeleteOptions {
+// deletes records namespace deletes, which the fake clientset performs unless handled.
+// The fake clientset ignores DeleteOptions.
+func deletes(cs *fake.Clientset, handled bool) *[]metav1.DeleteOptions {
 	var got []metav1.DeleteOptions
 	cs.PrependReactor("delete", "namespaces", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		got = append(got, a.(k8stesting.DeleteActionImpl).DeleteOptions)
-		return false, nil, nil
+		return handled, nil, nil
 	})
 	return &got
 }
@@ -55,7 +56,7 @@ func nsExists(t *testing.T, cs *fake.Clientset) bool {
 
 func TestReapKeepsNamespaceBeforeDeadline(t *testing.T) {
 	cs := fake.NewClientset(expiring(now.Add(time.Second)))
-	got := deletes(cs)
+	got := deletes(cs, false)
 	if err := newReaper(cs).Reap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestReapKeepsNamespaceBeforeDeadline(t *testing.T) {
 
 func TestReapDeletesAtDeadlineOnlyIfNamespaceUnchanged(t *testing.T) {
 	cs := fake.NewClientset(expiring(now))
-	got := deletes(cs)
+	got := deletes(cs, false)
 	if err := newReaper(cs).Reap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +103,7 @@ func TestReapRefusesWithoutValidDeadline(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cs := fake.NewClientset(ns)
-			got := deletes(cs)
+			got := deletes(cs, false)
 			err := newReaper(cs).Reap(context.Background())
 			if err == nil || !strings.Contains(err.Error(), kube.ExpiresAtAnnotation) {
 				t.Errorf("err %v", err)
@@ -122,7 +123,7 @@ func TestReapIgnoresTerminatingOrMissingNamespace(t *testing.T) {
 		"missing":     fake.NewClientset(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := deletes(cs)
+			got := deletes(cs, false)
 			if err := newReaper(cs).Reap(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -145,17 +146,13 @@ func TestReapReportsDeleteFailure(t *testing.T) {
 
 func TestCheckDryRunsTheDelete(t *testing.T) {
 	cs := fake.NewClientset(expiring(now.Add(time.Hour)))
-	var got []metav1.DeleteOptions
-	cs.PrependReactor("delete", "namespaces", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		got = append(got, a.(k8stesting.DeleteActionImpl).DeleteOptions)
-		return true, nil, nil
-	})
+	got := deletes(cs, true)
 	if err := newReaper(cs).Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || len(got[0].DryRun) != 1 || got[0].DryRun[0] != metav1.DryRunAll ||
-		got[0].Preconditions == nil || *got[0].Preconditions.ResourceVersion != "7" {
-		t.Errorf("delete options %+v", got)
+	if len(*got) != 1 || len((*got)[0].DryRun) != 1 || (*got)[0].DryRun[0] != metav1.DryRunAll ||
+		(*got)[0].Preconditions == nil || *(*got)[0].Preconditions.ResourceVersion != "7" {
+		t.Errorf("delete options %+v", *got)
 	}
 }
 
@@ -189,7 +186,7 @@ func TestReapReportsReadFailure(t *testing.T) {
 
 func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
 	cs := fake.NewClientset(expiring(now.Add(time.Minute)))
-	got := deletes(cs)
+	got := deletes(cs, false)
 	var failed atomic.Bool
 	cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
 		if failed.CompareAndSwap(false, true) {
@@ -222,6 +219,26 @@ func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
 	if len(*got) != 1 || calls.Load() < 2 {
 		t.Errorf("deletes %d after %d clock reads", len(*got), calls.Load())
 	}
+}
+
+func TestRunReapsBeforeTheFirstTick(t *testing.T) {
+	cs := fake.NewClientset(expiring(now))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		newReaper(cs).Run(ctx, time.Hour)
+		close(done)
+	}()
+	deadline := time.After(5 * time.Second)
+	for nsExists(t, cs) {
+		select {
+		case <-deadline:
+			t.Fatal("namespace not reaped")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
 }
 
 func TestMainValidation(t *testing.T) {
