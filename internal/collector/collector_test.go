@@ -1,12 +1,17 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -17,7 +22,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
@@ -111,6 +118,46 @@ func newCollector(client *fake.Clientset, nodeName string) *Collector {
 		Node:    nodeName,
 		Proc:    fixtureProc(),
 		Now:     func() time.Time { return fixedTime },
+		Log:     slog.New(slog.DiscardHandler),
+	}
+}
+
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLog(c *Collector) *logBuffer {
+	b := &logBuffer{}
+	c.Log = slog.New(slog.NewTextHandler(b, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+	return b
+}
+
+func assertLogged(t *testing.T, log *logBuffer, lines ...string) {
+	t.Helper()
+	for _, l := range lines {
+		if !strings.Contains(log.String(), l) {
+			t.Errorf("log lacks %q:\n%s", l, log)
+		}
 	}
 }
 
@@ -224,9 +271,11 @@ func TestRunSnapshotsImmediatelyAndRetriesAfterErrors(t *testing.T) {
 		cancel()
 		return false, nil, nil
 	})
+	c := newCollector(client, "cp1")
+	log := captureLog(c)
 	done := make(chan struct{})
 	go func() {
-		newCollector(client, "cp1").Run(ctx, 10*time.Millisecond)
+		c.Run(ctx, 10*time.Millisecond)
 		close(done)
 	}()
 	select {
@@ -238,6 +287,38 @@ func TestRunSnapshotsImmediatelyAndRetriesAfterErrors(t *testing.T) {
 		t.Errorf("applies %d", applies.Load())
 	}
 	readRows(t, client, "cp1")
+	assertLogged(t, log,
+		"level=INFO msg=\"collector started\" cluster=wl1 node=cp1 interval=10ms\n",
+		"level=ERROR msg=\"snapshot failed\" err=\"apply configmap: boom\"\n",
+		"level=INFO msg=\"snapshot written\" sockets=4\n",
+	)
+}
+
+func TestRunTimesOutHungSnapshot(t *testing.T) {
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer hung.Close()
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: hung.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newCollector(nil, "cp1")
+	c.Client = client
+	log := captureLog(c)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		c.Run(ctx, 50*time.Millisecond)
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(log.String(), "snapshot failed") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no timeout logged:\n%s", log)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertLogged(t, log, "context deadline exceeded")
 }
 
 func TestRunStartsWithoutWaitingForInterval(t *testing.T) {
@@ -320,6 +401,7 @@ func TestSnapshotMarksTruncatedSocketsJSONL(t *testing.T) {
 	client := fake.NewClientset(fixtureObjects()...)
 	c := newCollector(client, "cp1")
 	c.MaxDataBytes = 600
+	log := captureLog(c)
 	if err := c.Snapshot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +409,7 @@ func TestSnapshotMarksTruncatedSocketsJSONL(t *testing.T) {
 	if got, want := cm.Annotations[kube.TruncatedAnnotation], fmt.Sprintf("kept %d of 4 rows", len(rows)); got != want || len(rows) >= 4 {
 		t.Errorf("annotation %q want %q", got, want)
 	}
+	assertLogged(t, log, fmt.Sprintf("level=WARN msg=\"sockets.jsonl truncated to fit the ConfigMap size limit\" kept=%d sockets=4\n", len(rows)))
 
 	c.MaxDataBytes = 0
 	if err := c.Snapshot(context.Background()); err != nil {
