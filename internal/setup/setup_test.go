@@ -1141,31 +1141,80 @@ func TestRunLetsTheReaperRemoveWhatAFailedSetupApplied(t *testing.T) {
 	}
 }
 
-func TestRunRestoresTheEarlierDeadlineIfItCannotReadTheNamespaceBack(t *testing.T) {
+func TestRunRestoresTheEarlierDeadlineIfItFailsAfterApplyingTheNamespace(t *testing.T) {
+	for name, tt := range map[string]struct{ failReadBack, failStateSave bool }{
+		"namespace not read back": {failReadBack: true},
+		"state not saved":         {failStateSave: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			o := h.options(wl1)
+			o.TTL = 10 * time.Minute
+			if err := Run(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			fc := h.clusters["wl1"]
+			patched, failed := false, false
+			fc.cs.PrependReactor("patch", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+				if !patched && tt.failStateSave {
+					// state.Save cannot replace a directory.
+					if err := os.Remove(o.StatePath); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(o.StatePath, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				patched = true
+				return false, nil, nil
+			})
+			fc.cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+				if patched && !failed && tt.failReadBack {
+					failed = true
+					return true, nil, errors.New("apiserver down")
+				}
+				return false, nil, nil
+			})
+			if err := Run(context.Background(), o); err == nil {
+				t.Fatal("setup succeeded")
+			}
+			if got := reaperDeadline(t, fc); !got.Equal(now.Add(10 * time.Minute)) {
+				t.Errorf("deadline %v, want the earlier token's expiry", got)
+			}
+		})
+	}
+}
+
+func TestRunLeavesANamespaceThatLosesItsLabelDuringSetup(t *testing.T) {
 	h := newHarness(t)
-	o := h.options(wl1)
-	o.TTL = 10 * time.Minute
-	if err := Run(context.Background(), o); err != nil {
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
 		t.Fatal(err)
 	}
 	fc := h.clusters["wl1"]
-	patched, failed := false, false
-	fc.cs.PrependReactor("patch", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
-		patched = true
-		return false, nil, nil
-	})
+	gets := 0
 	fc.cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
-		if patched && !failed {
-			failed = true
-			return true, nil, errors.New("apiserver down")
+		if gets++; gets == 2 {
+			gvr := corev1.SchemeGroupVersion.WithResource("namespaces")
+			obj, err := fc.cs.Tracker().Get(gvr, "", kube.Namespace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := obj.(*corev1.Namespace).DeepCopy()
+			delete(ns.Labels, kube.ManagedByLabel)
+			if err := fc.cs.Tracker().Update(gvr, ns, ""); err != nil {
+				t.Fatal(err)
+			}
 		}
 		return false, nil, nil
 	})
-	if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "wl1: apiserver down") {
+	fc.cs.ClearActions()
+	if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "apply Namespace kglance: exists and is not managed by kglance") {
 		t.Fatalf("err %v", err)
 	}
-	if got := reaperDeadline(t, fc); !got.Equal(now.Add(10 * time.Minute)) {
-		t.Errorf("deadline %v, want the earlier token's expiry", got)
+	for _, a := range fc.cs.Actions() {
+		if a.GetVerb() == "patch" && a.GetResource().Resource == "namespaces" {
+			t.Error("patched the namespace")
+		}
 	}
 }
 

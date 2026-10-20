@@ -36,7 +36,7 @@ func readEarlierExpiries(ctx context.Context, o Options, clusters []*cluster) er
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
-		// applyAll refuses a namespace that kglance does not manage, so no earlier setup left it.
+		// Only a namespace that kglance manages is an earlier setup's.
 		if prev == nil || prev.Labels[kube.ManagedByLabel] != kube.ManagedByValue {
 			continue
 		}
@@ -58,7 +58,7 @@ func startReaper(ctx context.Context, o Options, c *cluster, record func() error
 	}
 	// If setup dies before it sets or shortens the deadline again, this deadline removes what setup applied.
 	provisional := later(c.earlierExpiry, o.Now().Add(o.Wait+setupMargin))
-	// Until setup reads the namespace back, shortenDeadlines restores the earlier namespace's deadline.
+	// If setup fails before it reads the namespace back, shortenDeadlines shortens the earlier namespace's deadline.
 	c.owner = c.earlier
 	if err := applyAll(ctx, o, c, []kube.Object{kube.NamespaceObject(provisional, c.earlierExpiry)}, record); err != nil {
 		return err
@@ -200,7 +200,7 @@ func armReapers(ctx context.Context, clusters []*cluster) error {
 
 const shortenTimeout = 30 * time.Second
 
-// shortenDeadlines moves each deadline that setup set back to when earlier setups' tokens expire, so that the reaper removes what a failed setup applied.
+// shortenDeadlines sets each deadline that setup controls to now, or to when earlier setups' tokens expire, so that the reaper removes what a failed setup applied.
 // It runs even if setup was cancelled.
 func shortenDeadlines(o Options, clusters []*cluster) {
 	for _, c := range clusters {
@@ -221,7 +221,7 @@ func setDeadline(ctx context.Context, c *cluster, at, tokensExpireAt time.Time) 
 	if err != nil {
 		return err
 	}
-	if ns.UID != c.owner.UID || ns.DeletionTimestamp != nil {
+	if ns.UID != c.owner.UID || ns.DeletionTimestamp != nil || ns.Labels[kube.ManagedByLabel] != kube.ManagedByValue {
 		return errNamespaceChanged
 	}
 	return kube.Apply(ctx, c.conn.Client, kube.NamespaceObject(at, tokensExpireAt))

@@ -112,7 +112,7 @@ type cluster struct {
 	earlier *corev1.Namespace
 	// earlierExpiry is when the tokens of earlier setups expire, or zero.
 	earlierExpiry time.Time
-	// owner is the workload namespace whose deadline setup set. It owns the cluster-scoped objects.
+	// owner is the workload namespace whose deadline setup controls. It owns the cluster-scoped objects.
 	owner *corev1.Namespace
 }
 
