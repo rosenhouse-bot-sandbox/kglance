@@ -324,6 +324,9 @@ func TestDaemonSetContract(t *testing.T) {
 	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Error("seccomp")
 	}
+	if sc.AppArmorProfile == nil || sc.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Errorf("apparmor %+v", sc.AppArmorProfile)
+	}
 	if c.Resources.Limits.Memory().IsZero() || c.Resources.Requests.Cpu().IsZero() {
 		t.Error("resources")
 	}
