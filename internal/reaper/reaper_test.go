@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -29,15 +30,21 @@ func expiring(at time.Time) *corev1.Namespace {
 	return namespace(map[string]string{kube.ExpiresAtAnnotation: at.Format(time.RFC3339)})
 }
 
-// deletes records namespace deletes, which the fake clientset performs unless handled.
-// The fake clientset ignores DeleteOptions.
-func deletes(cs *fake.Clientset, handled bool) *[]metav1.DeleteOptions {
+// deletes records namespace deletes. Unlike the fake clientset, it honours dry runs.
+func deletes(cs *fake.Clientset) *[]metav1.DeleteOptions {
 	var got []metav1.DeleteOptions
 	cs.PrependReactor("delete", "namespaces", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		got = append(got, a.(k8stesting.DeleteActionImpl).DeleteOptions)
-		return handled, nil, nil
+		opts := a.(k8stesting.DeleteActionImpl).DeleteOptions
+		got = append(got, opts)
+		return len(opts.DryRun) > 0, nil, nil
 	})
 	return &got
+}
+
+func forbidDeletes(cs *fake.Clientset) {
+	cs.PrependReactor("delete", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, kube.Namespace, errors.New("denied"))
+	})
 }
 
 func newReaper(cs *fake.Clientset) *Reaper {
@@ -56,7 +63,7 @@ func nsExists(t *testing.T, cs *fake.Clientset) bool {
 
 func TestReapKeepsNamespaceBeforeDeadline(t *testing.T) {
 	cs := fake.NewClientset(expiring(now.Add(time.Second)))
-	got := deletes(cs, false)
+	got := deletes(cs)
 	if err := newReaper(cs).Reap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +74,7 @@ func TestReapKeepsNamespaceBeforeDeadline(t *testing.T) {
 
 func TestReapDeletesAtDeadlineOnlyIfNamespaceUnchanged(t *testing.T) {
 	cs := fake.NewClientset(expiring(now))
-	got := deletes(cs, false)
+	got := deletes(cs)
 	if err := newReaper(cs).Reap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +110,7 @@ func TestReapRefusesWithoutValidDeadline(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cs := fake.NewClientset(ns)
-			got := deletes(cs, false)
+			got := deletes(cs)
 			err := newReaper(cs).Reap(context.Background())
 			if err == nil || !strings.Contains(err.Error(), kube.ExpiresAtAnnotation) {
 				t.Errorf("err %v", err)
@@ -123,7 +130,7 @@ func TestReapIgnoresTerminatingOrMissingNamespace(t *testing.T) {
 		"missing":     fake.NewClientset(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := deletes(cs, false)
+			got := deletes(cs)
 			if err := newReaper(cs).Reap(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -136,9 +143,7 @@ func TestReapIgnoresTerminatingOrMissingNamespace(t *testing.T) {
 
 func TestReapReportsDeleteFailure(t *testing.T) {
 	cs := fake.NewClientset(expiring(now))
-	cs.PrependReactor("delete", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, kube.Namespace, errors.New("denied"))
-	})
+	forbidDeletes(cs)
 	if err := newReaper(cs).Reap(context.Background()); !apierrors.IsForbidden(err) {
 		t.Fatalf("err %v", err)
 	}
@@ -146,7 +151,7 @@ func TestReapReportsDeleteFailure(t *testing.T) {
 
 func TestCheckDryRunsTheDelete(t *testing.T) {
 	cs := fake.NewClientset(expiring(now.Add(time.Hour)))
-	got := deletes(cs, true)
+	got := deletes(cs)
 	if err := newReaper(cs).Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +163,7 @@ func TestCheckDryRunsTheDelete(t *testing.T) {
 
 func TestCheckFailsWhenReapingWouldFail(t *testing.T) {
 	forbidden := fake.NewClientset(expiring(now.Add(time.Hour)))
-	forbidden.PrependReactor("delete", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, kube.Namespace, errors.New("denied"))
-	})
+	forbidDeletes(forbidden)
 	for name, cs := range map[string]*fake.Clientset{
 		"no deadline":   fake.NewClientset(namespace(nil)),
 		"no namespace":  fake.NewClientset(),
@@ -185,60 +188,91 @@ func TestReapReportsReadFailure(t *testing.T) {
 }
 
 func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
-	cs := fake.NewClientset(expiring(now.Add(time.Minute)))
-	got := deletes(cs, false)
-	var failed atomic.Bool
-	cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
-		if failed.CompareAndSwap(false, true) {
-			return true, nil, errors.New("apiserver down")
+	synctest.Test(t, func(t *testing.T) {
+		cs := fake.NewClientset(expiring(time.Now().Add(interval + time.Second)))
+		failed := false
+		cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+			if !failed {
+				failed = true
+				return true, nil, errors.New("apiserver down")
+			}
+			return false, nil, nil
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			(&Reaper{Client: cs, Now: time.Now}).Run(ctx)
+			close(done)
+		}()
+		time.Sleep(interval)
+		synctest.Wait()
+		if !nsExists(t, cs) {
+			t.Fatal("reaped before the deadline")
 		}
-		return false, nil, nil
-	})
-	var calls atomic.Int32
-	r := &Reaper{Client: cs, Now: func() time.Time { return now.Add(time.Duration(calls.Add(1)) * 30 * time.Second) }}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		r.Run(ctx, time.Millisecond)
-		close(done)
-	}()
-	deadline := time.After(5 * time.Second)
-	for nsExists(t, cs) {
+		time.Sleep(interval)
+		synctest.Wait()
+		if nsExists(t, cs) {
+			t.Fatal("not reaped after the deadline")
+		}
+		cancel()
+		synctest.Wait()
 		select {
-		case <-deadline:
-			t.Fatal("namespace not reaped")
-		case <-time.After(time.Millisecond):
+		case <-done:
+		default:
+			t.Error("Run did not stop")
 		}
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not stop")
-	}
-	if len(*got) != 1 || calls.Load() < 2 {
-		t.Errorf("deletes %d after %d clock reads", len(*got), calls.Load())
-	}
+	})
 }
 
 func TestRunReapsBeforeTheFirstTick(t *testing.T) {
-	cs := fake.NewClientset(expiring(now))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		newReaper(cs).Run(ctx, time.Hour)
-		close(done)
-	}()
-	deadline := time.After(5 * time.Second)
-	for nsExists(t, cs) {
-		select {
-		case <-deadline:
-			t.Fatal("namespace not reaped")
-		case <-time.After(time.Millisecond):
+	synctest.Test(t, func(t *testing.T) {
+		cs := fake.NewClientset(expiring(time.Now()))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go (&Reaper{Client: cs, Now: time.Now}).Run(ctx)
+		synctest.Wait()
+		if nsExists(t, cs) {
+			t.Error("namespace not reaped")
 		}
-	}
-	cancel()
-	<-done
+	})
+}
+
+// runMain runs Main against cs until it returns or a minute passes.
+func runMain(t *testing.T, cs *fake.Clientset, args ...string) error {
+	t.Helper()
+	orig := newClient
+	t.Cleanup(func() { newClient = orig })
+	newClient = func() (kubernetes.Interface, error) { return cs, nil }
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	return Main(ctx, args)
+}
+
+func TestMainReaps(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cs := fake.NewClientset(expiring(time.Now()))
+		deletes(cs)
+		if err := runMain(t, cs); err != nil {
+			t.Fatal(err)
+		}
+		if nsExists(t, cs) {
+			t.Error("namespace not reaped")
+		}
+	})
+}
+
+func TestMainChecksWithoutDeleting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cs := fake.NewClientset(expiring(time.Now()))
+		got := deletes(cs)
+		if err := runMain(t, cs, "--check"); err != nil {
+			t.Fatal(err)
+		}
+		if len(*got) != 1 || len((*got)[0].DryRun) != 1 || !nsExists(t, cs) {
+			t.Errorf("deletes %+v", *got)
+		}
+	})
 }
 
 func TestMainValidation(t *testing.T) {
@@ -248,7 +282,6 @@ func TestMainValidation(t *testing.T) {
 		wantErr string
 	}{
 		{[]string{"--bogus"}, "bogus"},
-		{[]string{"--interval", "0s"}, "interval"},
 		{nil, "in-cluster"},
 		{[]string{"--check"}, "in-cluster"},
 	} {

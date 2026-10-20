@@ -38,7 +38,7 @@ func TestApplyCreatesAndReappliesEveryWorkloadObject(t *testing.T) {
 }
 
 func allWorkloadObjects() []Object {
-	ns := NamespaceObject(time.Now())
+	ns := NamespaceObject(time.Now(), time.Time{})
 	return slices.Concat([]Object{ns}, ReaperObjects("i"), WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}))
 }
 

@@ -9,7 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestFilterViewRulesDropsDangerousSubresourcesSecretsAndWriteVerbs(t *testing.T) {
@@ -152,20 +154,26 @@ func TestBindingsTargetServiceAccountInNamespace(t *testing.T) {
 }
 
 func TestWorkloadNamespaceAllowsPrivilegedPods(t *testing.T) {
-	ns := NamespaceObject(time.Now())
+	ns := NamespaceObject(time.Now(), time.Time{})
 	if ns.Name != Namespace || ns.Labels["pod-security.kubernetes.io/enforce"] != "privileged" {
 		t.Errorf("%+v", ns)
 	}
 }
 
-func TestWorkloadNamespaceRecordsDeadlineInUTC(t *testing.T) {
+func TestWorkloadNamespaceRecordsDeadlinesInUTC(t *testing.T) {
 	at := time.Date(2026, 10, 19, 14, 5, 6, 0, time.FixedZone("PDT", -7*3600))
-	ns := NamespaceObject(at)
+	ns := NamespaceObject(at, at.Add(-time.Hour))
 	if got := ns.Annotations[ExpiresAtAnnotation]; got != "2026-10-19T21:05:06Z" {
-		t.Errorf("annotation %q", got)
+		t.Errorf("deadline %q", got)
 	}
-	if got, err := ExpiresAt(ns); err != nil || !got.Equal(at) {
-		t.Errorf("ExpiresAt %v %v", got, err)
+	if got := ns.Annotations[TokensExpireAtAnnotation]; got != "2026-10-19T20:05:06Z" {
+		t.Errorf("token expiry %q", got)
+	}
+	if got, err := TimeAnnotation(ns, ExpiresAtAnnotation); err != nil || !got.Equal(at) {
+		t.Errorf("TimeAnnotation %v %v", got, err)
+	}
+	if _, ok := NamespaceObject(at, time.Time{}).Annotations[TokensExpireAtAnnotation]; ok {
+		t.Error("zero token expiry recorded")
 	}
 }
 
@@ -188,8 +196,14 @@ func TestReaperRoleDeletesOnlyItsNamespace(t *testing.T) {
 
 func TestReaperContract(t *testing.T) {
 	d := Reaper("img:1")
-	if d.Name != ReaperDeployment || d.Namespace != Namespace || *d.Spec.Replicas != 1 || d.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+	if d.Name != ReaperDeployment || d.Namespace != Namespace || *d.Spec.Replicas != 1 {
 		t.Fatalf("%s/%s %+v", d.Namespace, d.Name, d.Spec)
+	}
+	surge, unavailable := intstr.FromInt32(1), intstr.FromInt32(0)
+	if want := (appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType, RollingUpdate: &appsv1.RollingUpdateDeployment{
+		MaxSurge: &surge, MaxUnavailable: &unavailable,
+	}}); !equality.Semantic.DeepEqual(d.Spec.Strategy, want) {
+		t.Errorf("strategy %+v", d.Spec.Strategy)
 	}
 	if d.Spec.Selector.MatchLabels[NameLabel] != ReaperDeployment || d.Spec.Template.Labels[NameLabel] != ReaperDeployment {
 		t.Error("selector")
@@ -204,8 +218,12 @@ func TestReaperContract(t *testing.T) {
 	if len(p.Tolerations) != 1 || p.Tolerations[0] != (corev1.Toleration{Key: ControlPlaneLabel, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}) {
 		t.Errorf("tolerations %+v", p.Tolerations)
 	}
+	if p.NodeSelector[corev1.LabelOSStable] != "linux" || p.TerminationGracePeriodSeconds == nil || *p.TerminationGracePeriodSeconds != 5 {
+		t.Errorf("node selector %v, grace %v", p.NodeSelector, p.TerminationGracePeriodSeconds)
+	}
 	psc := p.SecurityContext
 	if psc == nil || psc.RunAsNonRoot == nil || !*psc.RunAsNonRoot || psc.RunAsUser == nil || *psc.RunAsUser == 0 ||
+		psc.RunAsGroup == nil || *psc.RunAsGroup == 0 ||
 		psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("pod security context %+v", psc)
 	}
@@ -222,11 +240,17 @@ func TestReaperContract(t *testing.T) {
 		(sc.Privileged != nil && *sc.Privileged) || sc.RunAsUser != nil {
 		t.Errorf("security context %+v", sc)
 	}
-	if c.StartupProbe == nil || c.StartupProbe.Exec == nil || !slices.Equal(c.StartupProbe.Exec.Command, []string{"/kglance", "reap", "--check"}) {
-		t.Errorf("startup probe %+v", c.StartupProbe)
+	if want := (&corev1.Probe{
+		ProbeHandler:  corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/kglance", "reap", "--check"}}},
+		PeriodSeconds: 10, TimeoutSeconds: 10, FailureThreshold: 1,
+	}); !equality.Semantic.DeepEqual(c.ReadinessProbe, want) || c.StartupProbe != nil || c.LivenessProbe != nil {
+		t.Errorf("probes %+v %+v %+v", c.ReadinessProbe, c.StartupProbe, c.LivenessProbe)
 	}
-	if c.Resources.Limits.Memory().IsZero() || c.Resources.Requests.Cpu().IsZero() {
-		t.Error("resources")
+	if want := (corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("32Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
+	}); !equality.Semantic.DeepEqual(c.Resources, want) {
+		t.Errorf("resources %+v", c.Resources)
 	}
 	if got := Reaper("img").Spec.Template.Spec.Containers[0].ImagePullPolicy; got != corev1.PullAlways {
 		t.Errorf("untagged image pull policy %s", got)
@@ -317,9 +341,8 @@ func TestDaemonSetContract(t *testing.T) {
 
 func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 	sets := map[string][]Object{
-		"mgmt": MgmtObjects("team"),
-		"workload": slices.Concat([]Object{NamespaceObject(time.Now())}, ReaperObjects("i"),
-			WorkloadObjects(&corev1.Namespace{}, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})),
+		"mgmt":     MgmtObjects("team"),
+		"workload": allWorkloadObjects(),
 	}
 	for name, objs := range sets {
 		for _, o := range objs {

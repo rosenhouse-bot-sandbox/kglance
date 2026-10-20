@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -51,22 +52,26 @@ func meta(kind, apiVersion, namespace, name string) (metav1.TypeMeta, metav1.Obj
 }
 
 // NamespaceObject is the workload namespace, which allows the privileged collector and which the reaper deletes at expiresAt.
-func NamespaceObject(expiresAt time.Time) *corev1.Namespace {
+// A non-zero tokensExpireAt records when the latest agent token expires.
+func NamespaceObject(expiresAt, tokensExpireAt time.Time) *corev1.Namespace {
 	tm, om := meta("Namespace", "v1", "", Namespace)
 	om.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
 	om.Annotations = map[string]string{ExpiresAtAnnotation: expiresAt.UTC().Format(time.RFC3339)}
+	if !tokensExpireAt.IsZero() {
+		om.Annotations[TokensExpireAtAnnotation] = tokensExpireAt.UTC().Format(time.RFC3339)
+	}
 	return &corev1.Namespace{TypeMeta: tm, ObjectMeta: om}
 }
 
-// ExpiresAt returns the time at which the reaper deletes ns.
-func ExpiresAt(ns *corev1.Namespace) (time.Time, error) {
-	v, ok := ns.Annotations[ExpiresAtAnnotation]
+// TimeAnnotation parses the RFC3339 annotation key of ns.
+func TimeAnnotation(ns *corev1.Namespace, key string) (time.Time, error) {
+	v, ok := ns.Annotations[key]
 	if !ok {
-		return time.Time{}, fmt.Errorf("namespace %s has no %s annotation", ns.Name, ExpiresAtAnnotation)
+		return time.Time{}, fmt.Errorf("namespace %s has no %s annotation", ns.Name, key)
 	}
 	t, err := time.Parse(time.RFC3339, v)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("namespace %s: annotation %s: %w", ns.Name, ExpiresAtAnnotation, err)
+		return time.Time{}, fmt.Errorf("namespace %s: annotation %s: %w", ns.Name, key, err)
 	}
 	return t, nil
 }
@@ -243,9 +248,13 @@ func Reaper(image string) *appsv1.Deployment {
 	podLabels := map[string]string{NameLabel: ReaperDeployment, ManagedByLabel: ManagedByValue}
 	yes, no := true, false
 	replicas, nonRoot, grace := int32(1), int64(65532), int64(5)
+	maxSurge, maxUnavailable := intstr.FromInt32(1), intstr.FromInt32(0)
 	return &appsv1.Deployment{TypeMeta: tm, ObjectMeta: om, Spec: appsv1.DeploymentSpec{
 		Replicas: &replicas,
-		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+		// The old reaper keeps running until its replacement passes the check.
+		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType, RollingUpdate: &appsv1.RollingUpdateDeployment{
+			MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable,
+		}},
 		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{NameLabel: ReaperDeployment}},
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
@@ -266,11 +275,12 @@ func Reaper(image string) *appsv1.Deployment {
 					Image:           image,
 					ImagePullPolicy: pullPolicy(image),
 					Args:            []string{"reap"},
-					StartupProbe: &corev1.Probe{
+					// Setup trusts a ready reaper, so the check repeats.
+					ReadinessProbe: &corev1.Probe{
 						ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/kglance", "reap", "--check"}}},
-						PeriodSeconds:    2,
+						PeriodSeconds:    10,
 						TimeoutSeconds:   10,
-						FailureThreshold: 30,
+						FailureThreshold: 1,
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("32Mi")},

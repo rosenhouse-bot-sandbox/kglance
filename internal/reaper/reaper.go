@@ -17,22 +17,25 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 )
 
-// Main runs the reaper inside its Deployment pod. With --check it runs the pod's startup check instead.
+const interval = 10 * time.Second
+
+// newClient connects as the pod's ServiceAccount.
+var newClient = func() (kubernetes.Interface, error) {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	return kubernetes.NewForConfig(cfg)
+}
+
+// Main runs the reaper inside its Deployment pod. With --check it runs the pod's readiness check instead.
 func Main(ctx context.Context, args []string) error {
 	fl := flag.NewFlagSet("reap", flag.ContinueOnError)
-	interval := fl.Duration("interval", 10*time.Second, "time between deadline checks")
 	check := fl.Bool("check", false, "check once that the namespace could be deleted, then exit")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
-	if *interval <= 0 {
-		return fmt.Errorf("--interval must be positive")
-	}
-	cfg, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("in-cluster config: %w", err)
-	}
-	client, err := kubernetes.NewForConfig(cfg)
+	client, err := newClient()
 	if err != nil {
 		return err
 	}
@@ -40,7 +43,7 @@ func Main(ctx context.Context, args []string) error {
 	if *check {
 		return r.Check(ctx)
 	}
-	r.Run(ctx, *interval)
+	r.Run(ctx)
 	return nil
 }
 
@@ -50,7 +53,7 @@ type Reaper struct {
 }
 
 // Run calls Reap immediately and then every interval until ctx is done.
-func (r *Reaper) Run(ctx context.Context, interval time.Duration) {
+func (r *Reaper) Run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -77,7 +80,7 @@ func (r *Reaper) Reap(ctx context.Context) error {
 	if ns.DeletionTimestamp != nil {
 		return nil
 	}
-	at, err := kube.ExpiresAt(ns)
+	at, err := kube.TimeAnnotation(ns, kube.ExpiresAtAnnotation)
 	if err != nil {
 		return err
 	}
@@ -96,13 +99,13 @@ func (r *Reaper) Reap(ctx context.Context) error {
 	return nil
 }
 
-// Check dry-runs the delete, so that missing RBAC or a blocking admission policy shows before any token exists.
+// Check dry-runs the delete, so that missing RBAC or a blocking admission policy makes the reaper unready.
 func (r *Reaper) Check(ctx context.Context) error {
 	ns, err := r.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	if _, err := kube.ExpiresAt(ns); err != nil {
+	if _, err := kube.TimeAnnotation(ns, kube.ExpiresAtAnnotation); err != nil {
 		return err
 	}
 	return deleteUnchanged(ctx, r.Client, ns, []string{metav1.DryRunAll})

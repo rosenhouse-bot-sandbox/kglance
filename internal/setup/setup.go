@@ -15,10 +15,8 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -106,11 +104,10 @@ type cluster struct {
 	record    state.Cluster
 	token     string
 	expiry    time.Time
-	// reapAt is the workload namespace's deadline before this setup, or zero.
-	reapAt time.Time
+	// earlierExpiry is when the tokens of earlier setups expire, or zero.
+	earlierExpiry time.Time
 	// owner is the workload namespace, which owns the cluster-scoped objects.
-	owner     *corev1.Namespace
-	viewRules []rbacv1.PolicyRule
+	owner *corev1.Namespace
 }
 
 func Run(ctx context.Context, o Options) error {
@@ -128,29 +125,14 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	installAll := func(install func(context.Context, Options, *cluster, func() error) error) error {
-		for _, c := range clusters {
-			record := func() error {
-				st.Put(c.record)
-				return state.Save(o.StatePath, st)
-			}
-			if err := install(ctx, o, c, record); err != nil {
-				if !slices.ContainsFunc(clusters, func(c *cluster) bool { return len(c.record.Objects) > 0 }) {
-					return fmt.Errorf("%s: %w", c.Name, err)
-				}
-				return fmt.Errorf("%s: %w; run kglance teardown to remove what was applied", c.Name, err)
-			}
-		}
-		return nil
-	}
 	// The privileged collector starts only after every reaper has shown that it can remove it.
-	if err := installAll(startReaper); err != nil {
+	if err := installAll(ctx, o, st, clusters, startReaper); err != nil {
 		return err
 	}
 	if err := waitReapers(ctx, o, clusters); err != nil {
-		return fmt.Errorf("%w; run kglance teardown to remove what was applied", err)
+		return fmt.Errorf("%w%s", err, teardownHint(clusters))
 	}
-	if err := installAll(grantAccess); err != nil {
+	if err := installAll(ctx, o, st, clusters, grantAccess); err != nil {
 		return err
 	}
 	expiry, err := mintTokens(ctx, o, clusters)
@@ -181,6 +163,27 @@ func Run(ctx context.Context, o Options) error {
 		fmt.Fprintf(o.Out, "\nwrote %s\n", o.InstructionsPath)
 	}
 	return collectorErr
+}
+
+// installAll runs install on each cluster, which calls record to save the cluster's state.
+func installAll(ctx context.Context, o Options, st *state.File, clusters []*cluster, install func(context.Context, Options, *cluster, func() error) error) error {
+	for _, c := range clusters {
+		record := func() error {
+			st.Put(c.record)
+			return state.Save(o.StatePath, st)
+		}
+		if err := install(ctx, o, c, record); err != nil {
+			return fmt.Errorf("%s: %w%s", c.Name, err, teardownHint(clusters))
+		}
+	}
+	return nil
+}
+
+func teardownHint(clusters []*cluster) string {
+	if slices.ContainsFunc(clusters, func(c *cluster) bool { return len(c.record.Objects) > 0 }) {
+		return "; run kglance teardown to remove what was applied"
+	}
+	return ""
 }
 
 func (o *Options) refuseAdminKubeconfigOutputs() error {
@@ -272,91 +275,16 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 	return out, nil
 }
 
-// startReaper applies a workload cluster's namespace and reaper, and calls record after each object so that a partial install is recorded.
-func startReaper(ctx context.Context, o Options, c *cluster, record func() error) error {
-	if c.Role != state.RoleWorkload {
-		// Recording mgmt first keeps the state file, and so teardown, in setup's cluster order.
-		return record()
-	}
-	prev, err := waitNamespaceGoneIfTerminating(ctx, o, c)
-	if err != nil {
-		return err
-	}
-	if prev != nil {
-		// Setup never writes a deadline past now + MaxTTL, so it ignores a later one.
-		if at, err := kube.ExpiresAt(prev); err == nil && !at.After(o.Now().Add(MaxTTL)) {
-			c.reapAt = at
-		}
-	}
-	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("read ClusterRole view: %w", err)
-	}
-	c.viewRules = view.Rules
-	// Until armReapers sets the token's expiry, the reaper removes a failed setup within MaxTTL.
-	// This deadline uses the local clock, so it allows for skew.
-	if err := applyAll(ctx, c, []kube.Object{kube.NamespaceObject(later(c.reapAt, o.Now().Add(MaxTTL)))}, record); err != nil {
-		return err
-	}
-	c.owner, err = c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	if c.owner.DeletionTimestamp != nil {
-		return fmt.Errorf("namespace %s started terminating; run setup again", kube.Namespace)
-	}
-	if err := deleteObjectsOwnedByEarlierNamespace(ctx, c); err != nil {
-		return err
-	}
-	return applyAll(ctx, c, kube.ReaperObjects(o.Image), record)
-}
-
 // grantAccess applies the agent's RBAC and, on workload clusters, the collector.
 func grantAccess(ctx context.Context, o Options, c *cluster, record func() error) error {
 	if c.Role != state.RoleWorkload {
 		return applyAll(ctx, c, kube.MgmtObjects(o.MgmtNamespace), record)
 	}
-	return applyAll(ctx, c, kube.WorkloadObjects(c.owner, c.viewRules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), record)
-}
-
-// deleteObjectsOwnedByEarlierNamespace deletes kglance's cluster-scoped objects that a deleted namespace still owns.
-// Garbage collection would delete them anyway, possibly just after setup re-applies them.
-func deleteObjectsOwnedByEarlierNamespace(ctx context.Context, c *cluster) error {
-	rbac := c.conn.Client.RbacV1()
-	sel := metav1.ListOptions{LabelSelector: kube.ManagedByLabel + "=" + kube.ManagedByValue}
-	bindings, err := rbac.ClusterRoleBindings().List(ctx, sel)
+	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
 	if err != nil {
-		return err
+		return fmt.Errorf("read ClusterRole view: %w", err)
 	}
-	for _, b := range bindings.Items {
-		if err := deleteIfOwnedByEarlierNamespace(ctx, b.ObjectMeta, c.owner.UID, rbac.ClusterRoleBindings().Delete); err != nil {
-			return err
-		}
-	}
-	roles, err := rbac.ClusterRoles().List(ctx, sel)
-	if err != nil {
-		return err
-	}
-	for _, r := range roles.Items {
-		if err := deleteIfOwnedByEarlierNamespace(ctx, r.ObjectMeta, c.owner.UID, rbac.ClusterRoles().Delete); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func deleteIfOwnedByEarlierNamespace(ctx context.Context, m metav1.ObjectMeta, uid types.UID, del func(context.Context, string, metav1.DeleteOptions) error) error {
-	earlier := func(r metav1.OwnerReference) bool {
-		return r.Kind == "Namespace" && r.Name == kube.Namespace && r.UID != uid
-	}
-	if !slices.ContainsFunc(m.OwnerReferences, earlier) {
-		return nil
-	}
-	err := del(ctx, m.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &m.UID}})
-	if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
-		return nil
-	}
-	return err
+	return applyAll(ctx, c, kube.WorkloadObjects(c.owner, view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), record)
 }
 
 func applyAll(ctx context.Context, c *cluster, objs []kube.Object, record func() error) error {
@@ -385,6 +313,21 @@ func applyAll(ctx context.Context, c *cluster, objs []kube.Object, record func()
 func recordOf(obj kube.Object) state.Object {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	return state.Object{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
+}
+
+// poll calls get every o.PollInterval until done or the deadline, and returns the last result.
+func poll[T any](ctx context.Context, o Options, deadline time.Time, get func() (T, error), done func(T) bool) (T, error) {
+	for {
+		v, err := get()
+		if err != nil || done(v) || time.Now().After(deadline) {
+			return v, err
+		}
+		select {
+		case <-ctx.Done():
+			return v, ctx.Err()
+		case <-time.After(o.PollInterval):
+		}
+	}
 }
 
 const terminatingTimeout = 2 * time.Minute
