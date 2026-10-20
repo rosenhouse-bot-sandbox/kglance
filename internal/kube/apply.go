@@ -41,9 +41,18 @@ func Apply(ctx context.Context, cs kubernetes.Interface, obj Object) error {
 		return fmt.Errorf("apply: unsupported kind %s", kind)
 	}
 	if err != nil {
-		return fmt.Errorf("apply %s %s: %w", kind, name, err)
+		return fmt.Errorf("apply %s: %w", Describe(obj), err)
 	}
 	return nil
+}
+
+// Describe names obj as its kind and namespace/name.
+func Describe(obj Object) string {
+	name := obj.GetName()
+	if ns := obj.GetNamespace(); ns != "" {
+		name = ns + "/" + name
+	}
+	return obj.GetObjectKind().GroupVersionKind().Kind + " " + name
 }
 
 // Managed reports whether an object exists and whether it carries the managed-by=kglance label.

@@ -68,6 +68,7 @@ type Options struct {
 	ConnectKubeconfig func(data []byte) (*kube.Conn, error)
 	Now               func() time.Time
 	Out, Err          io.Writer
+	DryRun            bool
 }
 
 func (o *Options) Validate() error {
@@ -124,6 +125,9 @@ func Run(ctx context.Context, o Options) error {
 	clusters, err := connectAll(ctx, o, st)
 	if err != nil {
 		return err
+	}
+	if o.DryRun {
+		return dryRun(ctx, o, clusters)
 	}
 	// The privileged collector starts only after every reaper has shown that it can remove it.
 	if err := installAll(ctx, o, st, clusters, startReaper); err != nil {
@@ -277,17 +281,27 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 
 // grantAccess applies the agent's RBAC and, on workload clusters, the collector.
 func grantAccess(ctx context.Context, o Options, c *cluster, record func() error) error {
+	objs, err := accessObjects(ctx, o, c, c.owner)
+	if err != nil {
+		return err
+	}
+	return applyAll(ctx, o, c, objs, record)
+}
+
+// accessObjects returns the agent's RBAC and, on workload clusters, the collector.
+// ns owns the cluster-scoped ones.
+func accessObjects(ctx context.Context, o Options, c *cluster, ns *corev1.Namespace) ([]kube.Object, error) {
 	if c.Role != state.RoleWorkload {
-		return applyAll(ctx, c, kube.MgmtObjects(o.MgmtNamespace), record)
+		return kube.MgmtObjects(o.MgmtNamespace), nil
 	}
 	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("read ClusterRole view: %w", err)
+		return nil, fmt.Errorf("read ClusterRole view: %w", err)
 	}
-	return applyAll(ctx, c, kube.WorkloadObjects(c.owner, view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), record)
+	return kube.WorkloadObjects(ns, view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), nil
 }
 
-func applyAll(ctx context.Context, c *cluster, objs []kube.Object, record func() error) error {
+func applyAll(ctx context.Context, o Options, c *cluster, objs []kube.Object, record func() error) error {
 	for _, obj := range objs {
 		kind := obj.GetObjectKind().GroupVersionKind().Kind
 		exists, managed, err := kube.Managed(ctx, c.conn.Client, kind, obj.GetNamespace(), obj.GetName())
@@ -295,7 +309,7 @@ func applyAll(ctx context.Context, c *cluster, objs []kube.Object, record func()
 			return err
 		}
 		if exists && !managed {
-			return fmt.Errorf("%s %s exists and is not managed by kglance", kind, obj.GetName())
+			return fmt.Errorf("apply %s: exists and is not managed by kglance", kube.Describe(obj))
 		}
 		if err := kube.Apply(ctx, c.conn.Client, obj); err != nil {
 			return err
@@ -306,6 +320,7 @@ func applyAll(ctx context.Context, c *cluster, objs []kube.Object, record func()
 		if err := record(); err != nil {
 			return err
 		}
+		fmt.Fprintf(o.Out, "%s: apply %s: ok\n", c.Name, kube.Describe(obj))
 	}
 	return nil
 }
@@ -369,9 +384,11 @@ func mintTokens(ctx context.Context, o Options, clusters []*cluster) (time.Time,
 	for _, c := range clusters {
 		tr, err := c.conn.Client.CoreV1().ServiceAccounts(c.namespace).CreateToken(ctx, kube.AgentSA,
 			&authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
+		step := "request token for " + c.namespace + "/" + kube.AgentSA
 		if err != nil {
-			return time.Time{}, fmt.Errorf("%s: request token: %w", c.Name, err)
+			return time.Time{}, fmt.Errorf("%s: %s: %w", c.Name, step, err)
 		}
+		fmt.Fprintf(o.Out, "%s: %s: ok\n", c.Name, step)
 		c.token, c.expiry = tr.Status.Token, tr.Status.ExpirationTimestamp.Time
 		if c.expiry.Before(o.Now().Add(o.TTL - time.Minute)) {
 			fmt.Fprintf(o.Err, "warning: %s: token expires at %s; the API server shortened the requested --ttl %v\n", c.Name, clock(c.expiry), o.TTL)

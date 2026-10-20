@@ -45,7 +45,7 @@ func startReaper(ctx context.Context, o Options, c *cluster, record func() error
 	}
 	// Until armReapers replaces it, this deadline outlasts setup and removes a failed one.
 	provisional := later(c.earlierExpiry, o.Now().Add(o.Wait+setupMargin))
-	if err := applyAll(ctx, c, []kube.Object{kube.NamespaceObject(provisional, c.earlierExpiry)}, record); err != nil {
+	if err := applyAll(ctx, o, c, []kube.Object{kube.NamespaceObject(provisional, c.earlierExpiry)}, record); err != nil {
 		return err
 	}
 	c.owner, err = c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
@@ -56,10 +56,16 @@ func startReaper(ctx context.Context, o Options, c *cluster, record func() error
 		return errNamespaceChanged
 	}
 	if err := deleteObjectsOwnedByEarlierNamespace(ctx, c); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", deleteEarlierStep, err)
 	}
-	return applyAll(ctx, c, kube.ReaperObjects(o.Image), record)
+	fmt.Fprintf(o.Out, "%s: %s: ok\n", c.Name, deleteEarlierStep)
+	return applyAll(ctx, o, c, kube.ReaperObjects(o.Image), record)
 }
+
+const (
+	deleteEarlierStep = "delete cluster RBAC owned by an earlier namespace"
+	waitReaperStep    = "wait for reaper " + kube.Namespace + "/" + kube.ReaperDeployment
+)
 
 var errNamespaceChanged = errors.New("namespace " + kube.Namespace + " changed during setup; run setup again")
 
@@ -119,11 +125,12 @@ func waitReapers(ctx context.Context, o Options, clusters []*cluster) error {
 			return c.conn.Client.AppsV1().Deployments(kube.Namespace).Get(ctx, kube.ReaperDeployment, metav1.GetOptions{})
 		}, deploymentRolledOut)
 		if err != nil {
-			return fmt.Errorf("%s: %w", c.Name, err)
+			return fmt.Errorf("%s: %s: %w", c.Name, waitReaperStep, err)
 		}
 		if !deploymentRolledOut(d) {
-			return fmt.Errorf("%s: reaper not ready after %v%s", c.Name, o.Wait, reaperProblem(ctx, c))
+			return fmt.Errorf("%s: %s: not ready after %v%s", c.Name, waitReaperStep, o.Wait, reaperProblem(ctx, c))
 		}
+		fmt.Fprintf(o.Out, "%s: %s: ok\n", c.Name, waitReaperStep)
 	}
 	return nil
 }
