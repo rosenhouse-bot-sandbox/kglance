@@ -111,7 +111,7 @@ func fixtureObjects() []runtime.Object {
 
 var fixedTime = time.Date(2026, 10, 15, 18, 42, 7, 123, time.FixedZone("x", 3600))
 
-func newCollector(client *fake.Clientset, nodeName string) *Collector {
+func newCollector(client kubernetes.Interface, nodeName string) *Collector {
 	return &Collector{
 		Client:  client,
 		Cluster: "wl1",
@@ -294,31 +294,62 @@ func TestRunSnapshotsImmediatelyAndRetriesAfterErrors(t *testing.T) {
 	)
 }
 
-func TestRunTimesOutHungSnapshot(t *testing.T) {
+func hungClient(t *testing.T) kubernetes.Interface {
+	t.Helper()
 	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
-	defer hung.Close()
+	t.Cleanup(hung.Close)
 	client, err := kubernetes.NewForConfig(&rest.Config{Host: hung.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := newCollector(nil, "cp1")
-	c.Client = client
-	log := captureLog(c)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		c.Run(ctx, 50*time.Millisecond)
-		close(done)
-	}()
-	defer func() { cancel(); <-done }()
-	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(log.String(), "snapshot failed") {
-		if time.Now().After(deadline) {
-			t.Fatalf("no timeout logged:\n%s", log)
-		}
-		time.Sleep(10 * time.Millisecond)
+	return client
+}
+
+func TestRunTimesOutHungSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		interval, timeout time.Duration
+		want              time.Duration
+	}{
+		{"timeout", 10 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond},
+		{"interval", 200 * time.Millisecond, 10 * time.Millisecond, 200 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCollector(hungClient(t), "cp1")
+			c.Timeout = tc.timeout
+			log := captureLog(c)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			start := time.Now()
+			go func() {
+				c.Run(ctx, tc.interval)
+				close(done)
+			}()
+			defer func() { cancel(); <-done }()
+			for !strings.Contains(log.String(), "snapshot failed") {
+				if time.Since(start) > 5*tc.want {
+					t.Fatalf("no timeout logged after %v:\n%s", time.Since(start), log)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if elapsed := time.Since(start); elapsed < tc.want {
+				t.Errorf("timed out after %v, want %v", elapsed, tc.want)
+			}
+			assertLogged(t, log, `level=ERROR msg="snapshot failed" err="get node: Get \"`+c.Client.CoreV1().RESTClient().Get().AbsPath("/api/v1/nodes/cp1").URL().String()+`\": context deadline exceeded"`+"\n")
+		})
 	}
-	assertLogged(t, log, "context deadline exceeded")
+}
+
+func TestRunLogsNoFailureWhenCancelled(t *testing.T) {
+	c := newCollector(hungClient(t), "cp1")
+	c.Timeout = time.Hour
+	log := captureLog(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.Run(ctx, time.Hour)
+	if strings.Contains(log.String(), "snapshot failed") {
+		t.Errorf("logged failure on cancel:\n%s", log)
+	}
 }
 
 func TestRunStartsWithoutWaitingForInterval(t *testing.T) {

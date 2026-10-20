@@ -53,7 +53,7 @@ func Main(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	c := &Collector{Client: client, Cluster: cluster, Node: nodeName, Proc: os.DirFS("/proc"), Now: time.Now, Log: slog.Default()}
+	c := &Collector{Client: client, Cluster: cluster, Node: nodeName, Proc: os.DirFS("/proc"), Now: time.Now, Log: slog.Default(), Timeout: 30 * time.Second}
 	c.Run(ctx, *interval)
 	return nil
 }
@@ -65,18 +65,19 @@ type Collector struct {
 	Proc    fs.FS
 	Now     func() time.Time
 	Log     *slog.Logger
+	// Timeout bounds the API calls of each snapshot, or the interval if that is longer.
+	Timeout time.Duration
 	// MaxDataBytes defaults to defaultMaxDataBytes.
 	MaxDataBytes int
 }
 
 // Run takes a snapshot immediately and then every interval until ctx is done.
-// Each snapshot must finish within interval.
 func (c *Collector) Run(ctx context.Context, interval time.Duration) {
 	c.Log.Info("collector started", "cluster", c.Cluster, "node", c.Node, "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		snapshotCtx, cancel := context.WithTimeout(ctx, interval)
+		snapshotCtx, cancel := context.WithTimeout(ctx, max(c.Timeout, interval))
 		err := c.Snapshot(snapshotCtx)
 		cancel()
 		if err != nil {
