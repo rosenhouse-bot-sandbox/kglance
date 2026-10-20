@@ -297,7 +297,7 @@ func TestRunConfiguresClustersAndWritesOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Kubeconfig != o.KubeconfigPath || !st.Expiry.Equal(now.Add(time.Hour)) || len(st.Clusters) != 2 {
+	if st.Kubeconfig != o.KubeconfigPath || !st.Expiry.Equal(now.Add(time.Hour)) || len(st.Clusters) != 2 || st.Clusters[0].Name != "mgmt" {
 		t.Fatalf("state %+v", st)
 	}
 	sw := st.Find("wl1")

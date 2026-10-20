@@ -275,7 +275,8 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 // startReaper applies a workload cluster's namespace and reaper, and calls record after each object so that a partial install is recorded.
 func startReaper(ctx context.Context, o Options, c *cluster, record func() error) error {
 	if c.Role != state.RoleWorkload {
-		return nil
+		// Recording mgmt first keeps the state file, and so teardown, in setup's cluster order.
+		return record()
 	}
 	prev, err := waitNamespaceGoneIfTerminating(ctx, o, c)
 	if err != nil {
