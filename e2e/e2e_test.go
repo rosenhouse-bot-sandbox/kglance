@@ -92,9 +92,9 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 
 	t.Run("mgmt access", func(t *testing.T) {
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "clusters.cluster.x-k8s.io")
-		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "machines.cluster.x-k8s.io")
 		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "events")
-		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "pods,services,deployments")
+		e.allowed(t, agentKC, "mgmt", "-n", listenerNS, "get", "pods,services,deployments,configmaps,jobs")
+		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "machines.cluster.x-k8s.io")
 		e.forbidden(t, agentKC, "mgmt", "get", "clusters.cluster.x-k8s.io", "-A")
 		e.forbidden(t, agentKC, "mgmt", "-n", listenerNS, "get", "secrets")
 		e.forbidden(t, agentKC, "mgmt", "get", "--raw", "/api/v1/namespaces/"+listenerNS+"/pods/x/log")
@@ -236,6 +236,73 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSetupAsNamespaceAdmin runs setup as a user who holds only namespaced RBAC with explicit resources, as on vSphere Supervisor.
+func TestSetupAsNamespaceAdmin(t *testing.T) {
+	e := newEnv(t)
+	const ns = "kglance-e2e-ns-admin"
+	t.Cleanup(func() { e.admin(e.mgmtCtx, "delete", "namespace", ns, "--ignore-not-found", "--wait=false") })
+	e.mustApply(e.mgmtCtx, fmt.Sprintf(`apiVersion: v1
+kind: Namespace
+metadata: {name: %[1]s}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ns-admin, namespace: %[1]s}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ns-admin, namespace: %[1]s}
+rules:
+- {apiGroups: [""], resources: [serviceaccounts], verbs: [get, create, patch, delete]}
+- {apiGroups: [""], resources: [serviceaccounts/token], verbs: [create]}
+- {apiGroups: [rbac.authorization.k8s.io], resources: [roles, rolebindings], verbs: [get, create, patch, delete]}
+- {apiGroups: [""], resources: [pods, services, events], verbs: [get, list, watch]}
+- {apiGroups: [apps], resources: [deployments], verbs: [get, list, watch]}
+- {apiGroups: [events.k8s.io], resources: [events], verbs: [get, list, watch]}
+- {apiGroups: [cluster.x-k8s.io], resources: [clusters, machines], verbs: [get, list, watch]}
+- {apiGroups: [""], resources: [configmaps], verbs: [get, list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ns-admin, namespace: %[1]s}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ns-admin}
+subjects: [{kind: ServiceAccount, name: ns-admin, namespace: %[1]s}]
+`, ns))
+	kc := filepath.Join(e.dir, "ns-admin.kubeconfig")
+	if err := os.WriteFile(kc, []byte(e.mustAdmin(e.mgmtCtx, "config", "view", "--minify", "--flatten")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok := e.mustAdmin(e.mgmtCtx, "-n", ns, "create", "token", "ns-admin")
+	for _, args := range [][]string{{"config", "set-credentials", "ns-admin", "--token", tok}, {"config", "set-context", "--current", "--user", "ns-admin"}} {
+		if out, err := run(append([]string{"--kubeconfig", kc}, args...)); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+
+	setup := []string{"setup", "--kubeconfig", kc, "--mgmt-namespace", ns, "--state", "ns-admin.state.json", "-o", "ns-admin-agent.kubeconfig"}
+	if out := e.mustKglance(append(setup, "--dry-run")...); !strings.Contains(out, "dry run passed") {
+		t.Errorf("dry run output:\n%s", out)
+	}
+	out := e.mustKglance(setup...)
+	if !regexp.MustCompile(`mgmt: skip reads you do not hold: (.*, )?watch configmaps -n `+ns).MatchString(out) {
+		t.Errorf("setup output lacks skipped watch configmaps:\n%s", out)
+	}
+	agentKC := filepath.Join(e.dir, "ns-admin-agent.kubeconfig")
+	e.allowed(t, agentKC, "mgmt", "-n", ns, "get", "clusters.cluster.x-k8s.io,pods,services,deployments,events,configmaps")
+	e.forbidden(t, agentKC, "mgmt", "-n", ns, "get", "machines.cluster.x-k8s.io")
+	e.forbidden(t, agentKC, "mgmt", "-n", ns, "get", "jobs")
+	e.mustKglance("teardown", "--state", "ns-admin.state.json")
+	e.waitUnauthorized(agentKC, "mgmt")
+}
+
+func (e *env) mustApply(ctx, manifest string) {
+	cmd := exec.Command("kubectl", "--context", ctx, "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		e.t.Fatalf("apply: %v\n%s", err, out)
+	}
 }
 
 func newEnv(t *testing.T) *env {

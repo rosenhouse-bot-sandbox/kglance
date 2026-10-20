@@ -86,51 +86,44 @@ func TestAgentViewClusterRoleAddsEvents(t *testing.T) {
 	}
 }
 
-func TestMgmtReadRoleIsReadOnlyWithoutSecrets(t *testing.T) {
-	r := MgmtReadRole("team")
+func TestMgmtReadRoleGrantsExactlyTheGivenReads(t *testing.T) {
+	r := MgmtReadRole("team", []Access{
+		{Verb: "get", Group: "cluster.x-k8s.io", Resource: "clusters", Namespace: "team"},
+		{Verb: "list", Group: "cluster.x-k8s.io", Resource: "clusters", Namespace: "team"},
+		{Verb: "get", Group: "cluster.x-k8s.io", Resource: "machines", Namespace: "team"},
+		{Verb: "list", Group: "cluster.x-k8s.io", Resource: "machines", Namespace: "team"},
+		{Verb: "get", Group: "cluster.x-k8s.io", Resource: "machinesets", Namespace: "team"},
+		{Verb: "get", Resource: "pods", Namespace: "team"},
+	})
 	if r.Namespace != "team" || r.Name != AgentMgmtRole {
 		t.Errorf("%s/%s", r.Namespace, r.Name)
 	}
-	for _, g := range []string{"cluster.x-k8s.io", "infrastructure.cluster.x-k8s.io", "controlplane.cluster.x-k8s.io", "bootstrap.cluster.x-k8s.io", "addons.cluster.x-k8s.io", "ipam.cluster.x-k8s.io", "runtime.cluster.x-k8s.io"} {
-		if !allows(r.Rules, g, "anything", "list") {
-			t.Errorf("missing group %s", g)
-		}
+	want := []rbacv1.PolicyRule{
+		{APIGroups: []string{"cluster.x-k8s.io"}, Resources: []string{"clusters", "machines"}, Verbs: []string{"get", "list"}},
+		{APIGroups: []string{"cluster.x-k8s.io"}, Resources: []string{"machinesets"}, Verbs: []string{"get"}},
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}},
 	}
-	for _, c := range []struct{ group, res string }{
-		{"", "events"}, {"events.k8s.io", "events"}, {"", "pods"}, {"", "services"}, {"apps", "deployments"},
-		{"vmoperator.vmware.com", "virtualmachineservices"},
-	} {
-		if !allows(r.Rules, c.group, c.res, "watch") {
-			t.Errorf("missing %q/%s", c.group, c.res)
-		}
-	}
-	for _, c := range []struct{ group, res string }{
-		{"", "secrets"}, {"", "anything"}, {"", "pods/log"}, {"", "pods/exec"}, {"", "services/proxy"}, {"apps", "anything"},
-	} {
-		if allows(r.Rules, c.group, c.res, "get") {
-			t.Errorf("granted %q/%s", c.group, c.res)
-		}
-	}
-	for _, rule := range r.Rules {
-		if !slices.Equal(rule.Verbs, []string{"get", "list", "watch"}) {
-			t.Errorf("verbs %v", rule.Verbs)
-		}
+	if !equality.Semantic.DeepEqual(r.Rules, want) {
+		t.Errorf("got %+v", r.Rules)
 	}
 }
 
 func TestCollectorRBAC(t *testing.T) {
 	cr := CollectorClusterRole()
-	if !allows(cr.Rules, "", "pods", "list") || !allows(cr.Rules, "", "nodes", "get") || allows(cr.Rules, "", "configmaps", "create") {
+	wantCluster := []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list"}},
+		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get"}},
+	}
+	if !equality.Semantic.DeepEqual(cr.Rules, wantCluster) {
 		t.Errorf("cluster role %+v", cr.Rules)
 	}
 	r := CollectorRole()
 	if r.Namespace != Namespace {
 		t.Errorf("ns %s", r.Namespace)
 	}
-	for _, v := range []string{"get", "create", "update", "patch"} {
-		if !allows(r.Rules, "", "configmaps", v) {
-			t.Errorf("missing %s configmaps", v)
-		}
+	want := []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "patch"}}}
+	if !equality.Semantic.DeepEqual(r.Rules, want) {
+		t.Errorf("role %+v", r.Rules)
 	}
 }
 
@@ -341,7 +334,7 @@ func TestDaemonSetContract(t *testing.T) {
 
 func TestObjectSetsAreLabelledAndTyped(t *testing.T) {
 	sets := map[string][]Object{
-		"mgmt":     MgmtObjects("team"),
+		"mgmt":     MgmtObjects("team", nil),
 		"workload": allWorkloadObjects(),
 	}
 	for name, objs := range sets {
@@ -394,7 +387,7 @@ func TestDaemonSetPullsLatestOrUntaggedImagesAlways(t *testing.T) {
 }
 
 func TestMgmtObjectsAreInTheGivenNamespace(t *testing.T) {
-	objs := MgmtObjects("team")
+	objs := MgmtObjects("team", nil)
 	for _, o := range objs {
 		if o.GetNamespace() != "team" {
 			t.Errorf("%T %s in %q", o, o.GetName(), o.GetNamespace())

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -29,17 +30,6 @@ type Object interface {
 }
 
 var readVerbs = []string{"get", "list", "watch"}
-
-var mgmtCRDGroups = []string{
-	"cluster.x-k8s.io",
-	"infrastructure.cluster.x-k8s.io",
-	"controlplane.cluster.x-k8s.io",
-	"bootstrap.cluster.x-k8s.io",
-	"addons.cluster.x-k8s.io",
-	"ipam.cluster.x-k8s.io",
-	"runtime.cluster.x-k8s.io",
-	"vmoperator.vmware.com",
-}
 
 var eventRules = []rbacv1.PolicyRule{
 	{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: readVerbs},
@@ -145,12 +135,29 @@ func AgentViewClusterRole(viewRules []rbacv1.PolicyRule) *rbacv1.ClusterRole {
 	return clusterRole(AgentViewRole, append(FilterViewRules(viewRules), eventRules...))
 }
 
-func MgmtReadRole(ns string) *rbacv1.Role {
-	return role(ns, AgentMgmtRole, append([]rbacv1.PolicyRule{
-		{APIGroups: mgmtCRDGroups, Resources: []string{"*"}, Verbs: readVerbs},
-		{APIGroups: []string{""}, Resources: []string{"pods", "services"}, Verbs: readVerbs},
-		{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: readVerbs},
-	}, eventRules...))
+// MgmtReadRole grants reads, one rule per API group and set of verbs.
+func MgmtReadRole(ns string, reads []Access) *rbacv1.Role {
+	var rules []rbacv1.PolicyRule
+	var order []schema.GroupResource
+	verbs := map[schema.GroupResource][]string{}
+	for _, a := range reads {
+		gr := schema.GroupResource{Group: a.Group, Resource: a.Resource}
+		if _, seen := verbs[gr]; !seen {
+			order = append(order, gr)
+		}
+		verbs[gr] = append(verbs[gr], a.Verb)
+	}
+	for _, gr := range order {
+		i := slices.IndexFunc(rules, func(r rbacv1.PolicyRule) bool {
+			return r.APIGroups[0] == gr.Group && slices.Equal(r.Verbs, verbs[gr])
+		})
+		if i < 0 {
+			rules = append(rules, rbacv1.PolicyRule{APIGroups: []string{gr.Group}, Verbs: verbs[gr]})
+			i = len(rules) - 1
+		}
+		rules[i].Resources = append(rules[i].Resources, gr.Resource)
+	}
+	return role(ns, AgentMgmtRole, rules)
 }
 
 func AgentSnapshotRole() *rbacv1.Role {
@@ -159,14 +166,14 @@ func AgentSnapshotRole() *rbacv1.Role {
 
 func CollectorClusterRole() *rbacv1.ClusterRole {
 	return clusterRole(collectorRole, []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}},
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list"}},
 		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get"}},
 	})
 }
 
 func CollectorRole() *rbacv1.Role {
 	return role(Namespace, collectorRole, []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get", "create", "update", "patch"}},
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "patch"}},
 	})
 }
 
@@ -296,11 +303,11 @@ func Reaper(image string) *appsv1.Deployment {
 	}}
 }
 
-// MgmtObjects grants reads in the existing namespace ns only.
-func MgmtObjects(ns string) []Object {
+// MgmtObjects grant reads in the existing namespace ns only.
+func MgmtObjects(ns string, reads []Access) []Object {
 	return []Object{
 		ServiceAccount(ns, AgentSA),
-		MgmtReadRole(ns),
+		MgmtReadRole(ns, reads),
 		RoleBinding(AgentMgmtRole, ns, AgentSA),
 	}
 }

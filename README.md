@@ -50,7 +50,7 @@ read kglance.state.json: removing kglance from mgmt, wl1 ... done
 
 | Cluster | Access |
 |---|---|
-| Management | get, list and watch Cluster API and VM Operator objects, pods, services, deployments and events in `--mgmt-namespace`, but not Secrets or pod logs |
+| Management | get, list and watch Clusters, VirtualMachines, VirtualMachineServices and built-in objects other than Secrets in `--mgmt-namespace`, but only those you can read yourself |
 | Workload | the `view` ClusterRole without Secrets, logs, exec, attach, port-forward or proxy |
 
 The collector runs on every Linux node of each workload cluster, including control-plane nodes.

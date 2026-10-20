@@ -13,7 +13,7 @@ func Instructions(kubeconfig string, expiry time.Time, mgmtNamespace string, wor
 	var b strings.Builder
 	fmt.Fprintf(&b, "Read-only Kubernetes access via kglance. The tokens expire at %s.\n\n", expiry.UTC().Format("2006-01-02 15:04 UTC"))
 	fmt.Fprintf(&b, "  export KUBECONFIG=%s\n\nContexts:\n", kubeconfig)
-	fmt.Fprintf(&b, "  %-12s management cluster: Cluster API and VM Operator objects, pods, services, deployments and events in namespace %s\n", MgmtName, mgmtNamespace)
+	fmt.Fprintf(&b, "  %-12s management cluster: Clusters, VirtualMachines, VirtualMachineServices and built-in objects other than Secrets in namespace %s\n", MgmtName, mgmtNamespace)
 	for _, w := range workloads {
 		fmt.Fprintf(&b, "  %-12s workload cluster %s/%s: view, events, node socket snapshots\n", w.Name, mgmtNamespace, w.Cluster)
 	}

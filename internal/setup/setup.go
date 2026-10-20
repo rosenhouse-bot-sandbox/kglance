@@ -274,7 +274,7 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 		return nil, fmt.Errorf("%s: %w", MgmtName, err)
 	}
 	for _, rec := range out[0].record.Objects {
-		if !slices.ContainsFunc(kube.MgmtObjects(o.MgmtNamespace), func(obj kube.Object) bool { return recordOf(obj) == rec }) {
+		if !slices.ContainsFunc(kube.MgmtObjects(o.MgmtNamespace, nil), func(obj kube.Object) bool { return recordOf(obj) == rec }) {
 			return nil, fmt.Errorf("%s: recorded %s %s/%s outside --mgmt-namespace %s; run kglance teardown first", MgmtName, rec.Kind, rec.Namespace, rec.Name, o.MgmtNamespace)
 		}
 	}
@@ -300,7 +300,8 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 
 // grantAccess applies the agent's RBAC and, on workload clusters, the collector.
 func grantAccess(ctx context.Context, o Options, c *cluster, record func() error) error {
-	objs, err := accessObjects(ctx, o, c, c.owner)
+	allowed := func(a kube.Access) (bool, error) { return kube.Allowed(ctx, c.conn.Client, a) }
+	objs, err := accessObjects(ctx, o, c, c.owner, allowed)
 	if err != nil {
 		return err
 	}
@@ -309,15 +310,44 @@ func grantAccess(ctx context.Context, o Options, c *cluster, record func() error
 
 // accessObjects returns the agent's RBAC and, on workload clusters, the collector.
 // ns owns the cluster-scoped ones.
-func accessObjects(ctx context.Context, o Options, c *cluster, ns *corev1.Namespace) ([]kube.Object, error) {
+func accessObjects(ctx context.Context, o Options, c *cluster, ns *corev1.Namespace, allowed func(kube.Access) (bool, error)) ([]kube.Object, error) {
 	if c.Role != state.RoleWorkload {
-		return kube.MgmtObjects(o.MgmtNamespace), nil
+		reads, err := heldMgmtReads(o, c, allowed)
+		if err != nil {
+			return nil, err
+		}
+		return kube.MgmtObjects(o.MgmtNamespace, reads), nil
 	}
 	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("read ClusterRole view: %w", err)
 	}
 	return kube.WorkloadObjects(ns, view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), nil
+}
+
+// heldMgmtReads returns the agent's mgmt reads that the caller holds, since Kubernetes lets the caller grant only those.
+// It prints the others.
+func heldMgmtReads(o Options, c *cluster, allowed func(kube.Access) (bool, error)) ([]kube.Access, error) {
+	reads, err := kube.MgmtReads(c.conn.Client.Discovery(), o.MgmtNamespace)
+	if err != nil {
+		return nil, err
+	}
+	var held, unheld []kube.Access
+	for _, a := range reads {
+		ok, err := allowed(a)
+		if err != nil {
+			return nil, fmt.Errorf("review %s: %w", a, err)
+		}
+		if ok {
+			held = append(held, a)
+		} else {
+			unheld = append(unheld, a)
+		}
+	}
+	if len(unheld) > 0 {
+		fmt.Fprintf(o.Out, "%s: skip reads you do not hold: %s\n", c.Name, joinByResource(unheld))
+	}
+	return held, nil
 }
 
 func applyAll(ctx context.Context, o Options, c *cluster, objs []kube.Object, record func() error) error {
