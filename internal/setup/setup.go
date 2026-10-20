@@ -165,7 +165,7 @@ func Run(ctx context.Context, o Options) error {
 	return collectorErr
 }
 
-// installAll runs install on each cluster, which calls record to save the cluster's state.
+// installAll runs install on each cluster. install calls record to save that cluster's state.
 func installAll(ctx context.Context, o Options, st *state.File, clusters []*cluster, install func(context.Context, Options, *cluster, func() error) error) error {
 	for _, c := range clusters {
 		record := func() error {

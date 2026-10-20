@@ -242,7 +242,7 @@ func TestReaperContract(t *testing.T) {
 	}
 	if want := (&corev1.Probe{
 		ProbeHandler:  corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/kglance", "reap", "--check"}}},
-		PeriodSeconds: 10, TimeoutSeconds: 10, FailureThreshold: 1,
+		PeriodSeconds: 30, TimeoutSeconds: 10, FailureThreshold: 1,
 	}); !equality.Semantic.DeepEqual(c.ReadinessProbe, want) || c.StartupProbe != nil || c.LivenessProbe != nil {
 		t.Errorf("probes %+v %+v %+v", c.ReadinessProbe, c.StartupProbe, c.LivenessProbe)
 	}

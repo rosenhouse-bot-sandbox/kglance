@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -87,7 +86,9 @@ func (r *Reaper) Reap(ctx context.Context) error {
 	if r.Now().Before(at) {
 		return nil
 	}
-	err = deleteUnchanged(ctx, r.Client, ns, nil)
+	err = r.Client.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{ResourceVersion: &ns.ResourceVersion},
+	})
 	if apierrors.IsConflict(err) {
 		// Setup changed the namespace since the read, so the deadline may have moved.
 		return nil
@@ -108,12 +109,5 @@ func (r *Reaper) Check(ctx context.Context) error {
 	if _, err := kube.TimeAnnotation(ns, kube.ExpiresAtAnnotation); err != nil {
 		return err
 	}
-	return deleteUnchanged(ctx, r.Client, ns, []string{metav1.DryRunAll})
-}
-
-func deleteUnchanged(ctx context.Context, client kubernetes.Interface, ns *corev1.Namespace, dryRun []string) error {
-	return client.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{
-		DryRun:        dryRun,
-		Preconditions: &metav1.Preconditions{ResourceVersion: &ns.ResourceVersion},
-	})
+	return r.Client.CoreV1().Namespaces().Delete(ctx, ns.Name, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}})
 }

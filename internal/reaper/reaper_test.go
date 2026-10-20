@@ -3,6 +3,7 @@ package reaper
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -155,9 +156,21 @@ func TestCheckDryRunsTheDelete(t *testing.T) {
 	if err := newReaper(cs).Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(*got) != 1 || len((*got)[0].DryRun) != 1 || (*got)[0].DryRun[0] != metav1.DryRunAll ||
-		(*got)[0].Preconditions == nil || *(*got)[0].Preconditions.ResourceVersion != "7" {
+	if len(*got) != 1 || !slices.Equal((*got)[0].DryRun, []string{metav1.DryRunAll}) || !nsExists(t, cs) {
 		t.Errorf("delete options %+v", *got)
+	}
+}
+
+func TestCheckIgnoresChangesSinceItsRead(t *testing.T) {
+	cs := fake.NewClientset(expiring(now.Add(time.Hour)))
+	cs.PrependReactor("delete", "namespaces", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.(k8stesting.DeleteActionImpl).DeleteOptions.Preconditions != nil {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "namespaces"}, kube.Namespace, errors.New("rv"))
+		}
+		return true, nil, nil
+	})
+	if err := newReaper(cs).Check(context.Background()); err != nil {
+		t.Error(err)
 	}
 }
 
@@ -189,7 +202,7 @@ func TestReapReportsReadFailure(t *testing.T) {
 
 func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		cs := fake.NewClientset(expiring(time.Now().Add(interval + time.Second)))
+		cs := fake.NewClientset(expiring(time.Now().Add(11 * time.Second)))
 		failed := false
 		cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
 			if !failed {
@@ -205,12 +218,12 @@ func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
 			(&Reaper{Client: cs, Now: time.Now}).Run(ctx)
 			close(done)
 		}()
-		time.Sleep(interval)
+		time.Sleep(10 * time.Second)
 		synctest.Wait()
 		if !nsExists(t, cs) {
 			t.Fatal("reaped before the deadline")
 		}
-		time.Sleep(interval)
+		time.Sleep(10 * time.Second)
 		synctest.Wait()
 		if nsExists(t, cs) {
 			t.Fatal("not reaped after the deadline")

@@ -28,9 +28,10 @@ import (
 )
 
 const (
-	listenerNS          = "kglance-e2e"
-	listenerPort        = "18080"
-	expiresAtAnnotation = "kglance.rosenhouse-bot-sandbox.github.io/expires-at"
+	listenerNS               = "kglance-e2e"
+	listenerPort             = "18080"
+	expiresAtAnnotation      = "kglance.rosenhouse-bot-sandbox.github.io/expires-at"
+	tokensExpireAtAnnotation = "kglance.rosenhouse-bot-sandbox.github.io/tokens-expire-at"
 )
 
 var rowFields = []string{"cluster", "node", "role", "ts", "netns", "proto", "local", "peer", "state", "pid", "process", "pod", "container"}
@@ -152,8 +153,11 @@ func TestSetupAgentAccessTeardown(t *testing.T) {
 				t.Errorf("reaper %v: want Forbidden, got %v", args, err)
 			}
 		}
-		if got, want := e.reaperDeadline(), tokenExpiry(t, agentKC, "wl1"); !got.Equal(want) {
-			t.Errorf("reaper deadline %v, token expiry %v", got, want)
+		want := tokenExpiry(t, agentKC, "wl1")
+		for _, key := range []string{expiresAtAnnotation, tokensExpireAtAnnotation} {
+			if got := e.namespaceTime(key); !got.Equal(want) {
+				t.Errorf("%s %v, token expiry %v", key, got, want)
+			}
 		}
 	})
 
@@ -447,8 +451,8 @@ func (e *env) waitUnauthorized(kubeconfig, ctx string) {
 	}
 }
 
-func (e *env) reaperDeadline() time.Time {
-	v := e.mustAdmin(e.wlCtx, "get", "namespace", "kglance", "-o", "go-template={{index .metadata.annotations \""+expiresAtAnnotation+"\"}}")
+func (e *env) namespaceTime(annotation string) time.Time {
+	v := e.mustAdmin(e.wlCtx, "get", "namespace", "kglance", "-o", "go-template={{index .metadata.annotations \""+annotation+"\"}}")
 	at, err := time.Parse(time.RFC3339, v)
 	if err != nil {
 		e.t.Fatal(err)

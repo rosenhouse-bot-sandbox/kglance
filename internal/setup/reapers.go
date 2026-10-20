@@ -10,10 +10,14 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+// setupMargin covers setup's API calls and clock skew with the cluster.
+const setupMargin = time.Hour
 
 func later(a, b time.Time) time.Time {
 	if a.After(b) {
@@ -39,9 +43,9 @@ func startReaper(ctx context.Context, o Options, c *cluster, record func() error
 			c.earlierExpiry = at
 		}
 	}
-	// Until armReapers replaces it, this deadline removes a failed setup.
-	// It uses the local clock, so it is long enough to allow for skew with the cluster's.
-	if err := applyAll(ctx, c, []kube.Object{kube.NamespaceObject(o.Now().Add(MaxTTL), c.earlierExpiry)}, record); err != nil {
+	// Until armReapers replaces it, this deadline outlasts setup and removes a failed one.
+	provisional := later(c.earlierExpiry, o.Now().Add(o.Wait+setupMargin))
+	if err := applyAll(ctx, c, []kube.Object{kube.NamespaceObject(provisional, c.earlierExpiry)}, record); err != nil {
 		return err
 	}
 	c.owner, err = c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
@@ -118,15 +122,20 @@ func waitReapers(ctx context.Context, o Options, clusters []*cluster) error {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
 		if !deploymentRolledOut(d) {
-			return fmt.Errorf("%s: reaper not ready after %v%s", c.Name, o.Wait, reaperWaiting(ctx, c))
+			return fmt.Errorf("%s: reaper not ready after %v%s", c.Name, o.Wait, reaperProblem(ctx, c))
 		}
 	}
 	return nil
 }
 
-// reaperWaiting says why a reaper container is waiting, if one is.
-func reaperWaiting(ctx context.Context, c *cluster) string {
-	pods, err := c.conn.Client.CoreV1().Pods(kube.Namespace).List(ctx, metav1.ListOptions{LabelSelector: kube.NameLabel + "=" + kube.ReaperDeployment})
+// reaperProblem says why a reaper pod is not ready, if its status or latest failed check shows why.
+func reaperProblem(ctx context.Context, c *cluster) string {
+	core := c.conn.Client.CoreV1()
+	pods, err := core.Pods(kube.Namespace).List(ctx, metav1.ListOptions{LabelSelector: kube.NameLabel + "=" + kube.ReaperDeployment})
+	if err != nil {
+		return ""
+	}
+	events, err := core.Events(kube.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return ""
 	}
@@ -135,6 +144,15 @@ func reaperWaiting(ctx context.Context, c *cluster) string {
 			if w := s.State.Waiting; w != nil {
 				return fmt.Sprintf("; pod %s is waiting: %s: %s", p.Name, w.Reason, w.Message)
 			}
+		}
+		var latest *corev1.Event
+		for i, e := range events.Items {
+			if e.InvolvedObject.Name == p.Name && e.Reason == "Unhealthy" && (latest == nil || e.LastTimestamp.After(latest.LastTimestamp.Time)) {
+				latest = &events.Items[i]
+			}
+		}
+		if latest != nil {
+			return fmt.Sprintf("; pod %s: %s", p.Name, latest.Message)
 		}
 	}
 	return ""

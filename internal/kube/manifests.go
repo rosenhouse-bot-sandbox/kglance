@@ -242,7 +242,7 @@ func DaemonSet(o DaemonSetOptions) *appsv1.DaemonSet {
 }
 
 // Reaper runs "kglance reap", which deletes the namespace at its deadline.
-// Its startup probe dry-runs that delete, so the pod becomes ready only if the delete would succeed.
+// Its readiness probe dry-runs that delete, so the pod is ready only while the delete would succeed.
 func Reaper(image string) *appsv1.Deployment {
 	tm, om := meta("Deployment", "apps/v1", Namespace, ReaperDeployment)
 	podLabels := map[string]string{NameLabel: ReaperDeployment, ManagedByLabel: ManagedByValue}
@@ -275,10 +275,9 @@ func Reaper(image string) *appsv1.Deployment {
 					Image:           image,
 					ImagePullPolicy: pullPolicy(image),
 					Args:            []string{"reap"},
-					// Setup trusts a ready reaper, so the check repeats.
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/kglance", "reap", "--check"}}},
-						PeriodSeconds:    10,
+						PeriodSeconds:    30,
 						TimeoutSeconds:   10,
 						FailureThreshold: 1,
 					},

@@ -819,8 +819,8 @@ func TestRunSetsReaperDeadlineToTheTokenExpiryFromTheServer(t *testing.T) {
 	if err := Run(context.Background(), h.options(wl1)); err != nil {
 		t.Fatal(err)
 	}
-	if !atMint.Equal(now.Add(MaxTTL)) {
-		t.Errorf("deadline before minting %v, want setup time + MaxTTL", atMint)
+	if want := now.Add(h.options().Wait + setupMargin); !atMint.Equal(want) {
+		t.Errorf("deadline before minting %v, want %v", atMint, want)
 	}
 	if got := reaperDeadline(t, fc); !got.Equal(now.Add(30 * time.Minute)) {
 		t.Errorf("deadline %v, want token expiry", got)
@@ -872,6 +872,9 @@ func TestRerunAfterAFailedSetupKeepsOnlyTokenExpiries(t *testing.T) {
 	failing.Wait = 0
 	if err := Run(context.Background(), failing); err == nil {
 		t.Fatal("setup succeeded without a ready reaper")
+	}
+	if got := reaperDeadline(t, fc); !got.Equal(now.Add(2 * time.Hour)) {
+		t.Errorf("deadline after the failed setup %v, want the first token's expiry", got)
 	}
 	fc.reaper = nil
 	if err := Run(context.Background(), h.options(wl1)); err != nil {
@@ -932,6 +935,35 @@ func TestRunNamesTheReasonTheReaperIsWaiting(t *testing.T) {
 	o := h.options(wl1)
 	o.Wait = 20 * time.Millisecond
 	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "pod reaper-1 is waiting: CrashLoopBackOff: back-off 10s") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestRunNamesTheReaperCheckFailure(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	fc.reaper = func(d *appsv1.Deployment) { d.Status.AvailableReplicas = 0 }
+	labels := map[string]string{kube.NameLabel: kube.ReaperDeployment}
+	fc.cs.Tracker().Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reaper-1", Namespace: kube.Namespace, Labels: labels}})
+	event := func(name, pod, reason, message string, at time.Time) *corev1.Event {
+		return &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: name, Namespace: kube.Namespace},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: pod},
+			Reason:         reason, Message: message, LastTimestamp: metav1.NewTime(at),
+		}
+	}
+	// The fake lists events by name.
+	for _, e := range []*corev1.Event{
+		event("a", "reaper-1", "Unhealthy", "Readiness probe failed: kglance reap: denied by policy", now),
+		event("b", "reaper-1", "Unhealthy", "Readiness probe failed: old", now.Add(-time.Minute)),
+		event("c", "reaper-1", "Pulled", "Container image pulled", now.Add(time.Minute)),
+		event("d", "collector-1", "Unhealthy", "Readiness probe failed: collector", now.Add(time.Minute)),
+	} {
+		fc.cs.Tracker().Add(e)
+	}
+	o := h.options(wl1)
+	o.Wait = 20 * time.Millisecond
+	if err := Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "; pod reaper-1: Readiness probe failed: kglance reap: denied by policy") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -1006,7 +1038,7 @@ func TestRunDoesNotArmANamespaceThatChangedAfterMinting(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "wl1: set reaper deadline: namespace kglance changed during setup") {
 				t.Fatalf("err %v", err)
 			}
-			if got := reaperDeadline(t, fc); !got.Equal(now.Add(MaxTTL)) {
+			if got := reaperDeadline(t, fc); !got.Equal(now.Add(o.Wait + setupMargin)) {
 				t.Errorf("deadline %v", got)
 			}
 			if _, err := os.Stat(o.KubeconfigPath); !os.IsNotExist(err) {
@@ -1029,6 +1061,22 @@ func TestRunWaitsForTheReaper(t *testing.T) {
 	}
 	if gets != 3 {
 		t.Errorf("reaper checked %d times", gets)
+	}
+}
+
+func TestRunWaitsForTheCollectors(t *testing.T) {
+	h := newHarness(t)
+	gets := 0
+	h.clusters["wl1"].status = func(s *appsv1.DaemonSetStatus) {
+		if gets++; gets < 3 {
+			s.NumberReady = 1
+		}
+	}
+	if err := Run(context.Background(), h.options(wl1)); err != nil {
+		t.Fatal(err)
+	}
+	if gets != 3 {
+		t.Errorf("collectors checked %d times", gets)
 	}
 }
 
