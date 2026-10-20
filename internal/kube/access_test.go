@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"testing"
-	"time"
 
 	authzv1 "k8s.io/api/authorization/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -34,8 +33,7 @@ func TestAccessToObject(t *testing.T) {
 	if got := AccessTo("patch", r); got != want {
 		t.Errorf("got %+v", got)
 	}
-	objs := append(MgmtObjects("ns1"), WorkloadObjects(nil, DaemonSetOptions{Image: "i", Interval: time.Minute})...)
-	for _, o := range objs {
+	for _, o := range slices.Concat(MgmtObjects("ns1"), allWorkloadObjects()) {
 		if a := AccessTo("get", o); a.Resource == "" || a.Name != o.GetName() || a.Namespace != o.GetNamespace() {
 			t.Errorf("%T: %+v", o, a)
 		}

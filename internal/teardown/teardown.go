@@ -226,6 +226,7 @@ func removeLabelled(ctx context.Context, conn *kube.Conn, ns string, clusterScop
 		list          func() (runtime.Object, error)
 	}{
 		{"DaemonSet", false, func() (runtime.Object, error) { return cs.AppsV1().DaemonSets(ns).List(ctx, sel) }},
+		{"Deployment", false, func() (runtime.Object, error) { return cs.AppsV1().Deployments(ns).List(ctx, sel) }},
 		{"RoleBinding", false, func() (runtime.Object, error) { return cs.RbacV1().RoleBindings(ns).List(ctx, sel) }},
 		{"Role", false, func() (runtime.Object, error) { return cs.RbacV1().Roles(ns).List(ctx, sel) }},
 		{"ServiceAccount", false, func() (runtime.Object, error) { return cs.CoreV1().ServiceAccounts(ns).List(ctx, sel) }},

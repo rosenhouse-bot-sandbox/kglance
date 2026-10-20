@@ -3,11 +3,16 @@ package setup
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -15,7 +20,10 @@ import (
 func dryRun(ctx context.Context, o Options, clusters []*cluster) error {
 	steps, failed := 0, 0
 	for _, c := range clusters {
-		report := func(step string, problems []string) {
+		report := func(step string, problems []string, err error) error {
+			if err != nil {
+				return fmt.Errorf("%s: %w", c.Name, err)
+			}
 			steps++
 			result := "ok"
 			if len(problems) > 0 {
@@ -23,46 +31,82 @@ func dryRun(ctx context.Context, o Options, clusters []*cluster) error {
 				result = strings.Join(problems, "; ")
 			}
 			fmt.Fprintf(o.Out, "%s: %s: %s\n", c.Name, step, result)
+			return nil
 		}
-		objs, err := objectsFor(ctx, o, c)
-		if err != nil {
-			return fmt.Errorf("%s: %w", c.Name, err)
-		}
-		r := reviewer{cs: c.conn.Client, asked: map[kube.Access]bool{}}
-		if c.Role == state.RoleWorkload {
-			if r.terminating, err = r.namespaceTerminating(ctx); err != nil {
-				return fmt.Errorf("%s: %w", c.Name, err)
-			}
-			if r.terminating {
-				report("wait for namespace "+kube.Namespace+" to finish terminating", nil)
-			}
-		}
-		for _, obj := range objs {
-			problems, err := r.applyProblems(ctx, obj, objs)
-			if err != nil {
-				return fmt.Errorf("%s: %w", c.Name, err)
-			}
-			report("apply "+kube.Describe(obj), problems)
-		}
-		problems, err := r.deniedProblems(ctx,
-			kube.Access{Verb: "create", Resource: "serviceaccounts", Subresource: "token", Namespace: c.namespace, Name: kube.AgentSA})
-		if err != nil {
-			return fmt.Errorf("%s: %w", c.Name, err)
-		}
-		report("request token for "+c.namespace+"/"+kube.AgentSA, problems)
-		if c.Role == state.RoleWorkload {
-			problems, err := r.deniedProblems(ctx,
-				kube.Access{Verb: "list", Resource: "pods", Namespace: kube.Namespace}, kube.Access{Verb: "list", Resource: "nodes"})
-			if err != nil {
-				return fmt.Errorf("%s: %w", c.Name, err)
-			}
-			report("read collector status", problems)
+		if err := dryRunCluster(ctx, o, c, report); err != nil {
+			return err
 		}
 	}
 	if failed > 0 {
 		return fmt.Errorf("dry run: %d of %d steps would fail", failed, steps)
 	}
 	fmt.Fprintln(o.Out, "dry run passed")
+	return nil
+}
+
+// dryRunCluster reports each of c's steps in the order setup takes them.
+func dryRunCluster(ctx context.Context, o Options, c *cluster, report func(string, []string, error) error) error {
+	r := reviewer{cs: c.conn.Client, asked: map[kube.Access]bool{}}
+	workload := c.Role == state.RoleWorkload
+	var ns *corev1.Namespace
+	var reaper []kube.Object
+	if workload {
+		ns = kube.NamespaceObject(o.Now(), time.Time{})
+		reaper = kube.ReaperObjects(o.Image)
+	}
+	access, err := accessObjects(ctx, o, c, ns)
+	if err != nil {
+		return fmt.Errorf("%s: %w", c.Name, err)
+	}
+	planned := slices.Concat(reaper, access)
+	apply := func(obj kube.Object) error {
+		problems, err := r.applyProblems(ctx, obj, planned)
+		return report("apply "+kube.Describe(obj), problems, err)
+	}
+	if workload {
+		var err error
+		if r.terminating, err = r.namespaceTerminating(ctx); err != nil || r.terminating {
+			if err := report("wait for namespace "+kube.Namespace+" to finish terminating", nil, err); err != nil {
+				return err
+			}
+		}
+		if err := apply(ns); err != nil {
+			return err
+		}
+		problems, err := r.deniedProblems(ctx,
+			kube.Access{Verb: "list", Group: rbacv1.GroupName, Resource: "clusterrolebindings"},
+			kube.Access{Verb: "delete", Group: rbacv1.GroupName, Resource: "clusterrolebindings"},
+			kube.Access{Verb: "list", Group: rbacv1.GroupName, Resource: "clusterroles"},
+			kube.Access{Verb: "delete", Group: rbacv1.GroupName, Resource: "clusterroles"})
+		if err := report(deleteEarlierStep, problems, err); err != nil {
+			return err
+		}
+		for _, obj := range reaper {
+			if err := apply(obj); err != nil {
+				return err
+			}
+		}
+		problems, err = r.deniedProblems(ctx,
+			kube.Access{Verb: "get", Group: "apps", Resource: "deployments", Namespace: kube.Namespace, Name: kube.ReaperDeployment})
+		if err := report(waitReaperStep, problems, err); err != nil {
+			return err
+		}
+	}
+	for _, obj := range access {
+		if err := apply(obj); err != nil {
+			return err
+		}
+	}
+	problems, err := r.deniedProblems(ctx,
+		kube.Access{Verb: "create", Resource: "serviceaccounts", Subresource: "token", Namespace: c.namespace, Name: kube.AgentSA})
+	if err := report("request token for "+c.namespace+"/"+kube.AgentSA, problems, err); err != nil {
+		return err
+	}
+	if workload {
+		problems, err := r.deniedProblems(ctx,
+			kube.Access{Verb: "list", Resource: "pods", Namespace: kube.Namespace}, kube.Access{Verb: "list", Resource: "nodes"})
+		return report("read collector status", problems, err)
+	}
 	return nil
 }
 
@@ -78,7 +122,11 @@ func (r reviewer) namespaceTerminating(ctx context.Context) (bool, error) {
 	if err != nil || len(denied) > 0 {
 		return false, err
 	}
-	return namespaceTerminating(ctx, r.cs)
+	ns, err := r.cs.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil && ns.DeletionTimestamp != nil, err
 }
 
 // gone reports whether obj will be deleted with the terminating kglance namespace before setup applies it.

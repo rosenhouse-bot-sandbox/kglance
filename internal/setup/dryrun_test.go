@@ -45,6 +45,12 @@ mgmt: apply Role ns1/kglance-agent-capi: ok
 mgmt: apply RoleBinding ns1/kglance-agent-capi: ok
 mgmt: request token for ns1/kglance-agent: ok
 wl1: apply Namespace kglance: ok
+wl1: delete cluster RBAC owned by an earlier namespace: ok
+wl1: apply ServiceAccount kglance/kglance-reaper: ok
+wl1: apply Role kglance/kglance-reaper: ok
+wl1: apply RoleBinding kglance/kglance-reaper: ok
+wl1: apply Deployment kglance/kglance-reaper: ok
+wl1: wait for reaper kglance/kglance-reaper: ok
 wl1: apply ServiceAccount kglance/kglance-agent: ok
 wl1: apply ServiceAccount kglance/kglance-collector: ok
 wl1: apply ClusterRole kglance-agent-view: ok
@@ -93,6 +99,13 @@ func TestDryRunReportsWhatWouldFail(t *testing.T) {
 		"token": {"mgmt", func(a authzv1.ResourceAttributes) bool { return a.Subresource == "token" }, []string{
 			"mgmt: request token for ns1/kglance-agent: denied: create serviceaccounts/kglance-agent --subresource=token -n ns1",
 		}},
+		"earlier RBAC": {"wl1", denies("delete", "clusterroles"), []string{
+			"wl1: delete cluster RBAC owned by an earlier namespace: denied: delete clusterroles.rbac.authorization.k8s.io",
+		}},
+		"reaper": {"wl1", func(a authzv1.ResourceAttributes) bool { return a.Verb == "get" && a.Resource == "deployments" }, []string{
+			"wl1: apply Deployment kglance/kglance-reaper: denied: get deployments.apps/kglance-reaper -n kglance",
+			"wl1: wait for reaper kglance/kglance-reaper: denied: get deployments.apps/kglance-reaper -n kglance",
+		}},
 		"collector nodes": {"wl1", denies("list", "nodes"), []string{
 			"wl1: read collector status: denied: list nodes",
 		}},
@@ -121,7 +134,7 @@ func TestDryRunReportsWhatWouldFail(t *testing.T) {
 			o := h.options(wl1)
 			o.DryRun = true
 			err := Run(context.Background(), o)
-			if err == nil || err.Error() != fmt.Sprintf("dry run: %d of 18 steps would fail", len(c.want)) {
+			if err == nil || err.Error() != fmt.Sprintf("dry run: %d of 24 steps would fail", len(c.want)) {
 				t.Errorf("err %v", err)
 			}
 			for _, line := range c.want {
@@ -235,7 +248,7 @@ func TestRunPrintsTheStepsDryRunChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(dry.out.String(), "\n") {
-		if strings.Contains(line, ": apply ") || strings.Contains(line, ": request token ") {
+		if !strings.Contains(line, ": read collector status") && line != "dry run passed" {
 			if !strings.Contains(h.out.String(), line+"\n") {
 				t.Errorf("missing %q in:\n%s", line, h.out.String())
 			}

@@ -43,6 +43,7 @@ var resources = map[string]schema.GroupResource{
 	"Role":               {Group: rbacv1.GroupName, Resource: "roles"},
 	"RoleBinding":        {Group: rbacv1.GroupName, Resource: "rolebindings"},
 	"DaemonSet":          {Group: "apps", Resource: "daemonsets"},
+	"Deployment":         {Group: "apps", Resource: "deployments"},
 }
 
 // AccessTo is the request to verb obj.

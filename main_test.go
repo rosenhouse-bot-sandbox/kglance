@@ -112,6 +112,12 @@ func TestRunDispatch(t *testing.T) {
 		strings.Join(gotArgs, " ") != "--interval 5s" {
 		t.Errorf("collect: %d %q %v", code, errOut.String(), gotArgs)
 	}
+	reap = func(_ context.Context, args []string) error { gotArgs = args; return errors.New("bang") }
+	errOut.Reset()
+	if code := run([]string{"reap", "--check"}, &bytes.Buffer{}, &errOut); code != 1 || !strings.Contains(errOut.String(), "kglance reap: bang") ||
+		strings.Join(gotArgs, " ") != "--check" {
+		t.Errorf("reap: %d %q %v", code, errOut.String(), gotArgs)
+	}
 	errOut.Reset()
 	if code := run([]string{"setup", "--mgmt-namespace", "ns1", "--workload", "ns/x"}, &bytes.Buffer{}, &errOut); code != 2 {
 		t.Errorf("setup with bad workload: %d %q", code, errOut.String())

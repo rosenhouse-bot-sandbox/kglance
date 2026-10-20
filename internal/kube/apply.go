@@ -35,6 +35,8 @@ func Apply(ctx context.Context, cs kubernetes.Interface, obj Object) error {
 		_, err = cs.RbacV1().RoleBindings(ns).Patch(ctx, name, pt, data, opts)
 	case "DaemonSet":
 		_, err = cs.AppsV1().DaemonSets(ns).Patch(ctx, name, pt, data, opts)
+	case "Deployment":
+		_, err = cs.AppsV1().Deployments(ns).Patch(ctx, name, pt, data, opts)
 	default:
 		return fmt.Errorf("apply: unsupported kind %s", kind)
 	}
@@ -72,6 +74,8 @@ func Managed(ctx context.Context, cs kubernetes.Interface, kind, ns, name string
 		obj, err = cs.RbacV1().RoleBindings(ns).Get(ctx, name, opts)
 	case "DaemonSet":
 		obj, err = cs.AppsV1().DaemonSets(ns).Get(ctx, name, opts)
+	case "Deployment":
+		obj, err = cs.AppsV1().Deployments(ns).Get(ctx, name, opts)
 	default:
 		return false, false, fmt.Errorf("get: unsupported kind %s", kind)
 	}
@@ -103,6 +107,8 @@ func Delete(ctx context.Context, cs kubernetes.Interface, kind, ns, name string)
 		err = cs.RbacV1().RoleBindings(ns).Delete(ctx, name, opts)
 	case "DaemonSet":
 		err = cs.AppsV1().DaemonSets(ns).Delete(ctx, name, opts)
+	case "Deployment":
+		err = cs.AppsV1().Deployments(ns).Delete(ctx, name, opts)
 	default:
 		return fmt.Errorf("delete: unsupported kind %s", kind)
 	}

@@ -14,10 +14,10 @@ import (
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/kube"
 	"github.com/rosenhouse-bot-sandbox/kglance/internal/state"
 	authv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -85,6 +85,9 @@ func (o *Options) Validate() error {
 	if o.Interval <= 0 {
 		return errors.New("--interval must be positive")
 	}
+	if o.Wait < 0 {
+		return errors.New("--wait must not be negative")
+	}
 	if o.Image == "" {
 		return errors.New("--image must not be empty")
 	}
@@ -105,6 +108,12 @@ type cluster struct {
 	record    state.Cluster
 	token     string
 	expiry    time.Time
+	// earlier is the workload namespace that earlier setups left, or nil.
+	earlier *corev1.Namespace
+	// earlierExpiry is when the tokens of earlier setups expire, or zero.
+	earlierExpiry time.Time
+	// owner is the workload namespace whose deadline setup controls. It owns the cluster-scoped objects.
+	owner *corev1.Namespace
 }
 
 func Run(ctx context.Context, o Options) error {
@@ -125,24 +134,10 @@ func Run(ctx context.Context, o Options) error {
 	if o.DryRun {
 		return dryRun(ctx, o, clusters)
 	}
-	for _, c := range clusters {
-		record := func() error {
-			st.Put(c.record)
-			return state.Save(o.StatePath, st)
-		}
-		if err := install(ctx, o, c, record); err != nil {
-			if len(c.record.Objects) == 0 {
-				return fmt.Errorf("%s: %w", c.Name, err)
-			}
-			return fmt.Errorf("%s: %w; run kglance teardown to remove what was applied", c.Name, err)
-		}
-	}
-	expiry, err := mintTokens(ctx, o, clusters)
+	expiry, err := provision(ctx, o, st, clusters)
 	if err != nil {
-		return err
-	}
-	if err := state.WriteFileAtomic(o.KubeconfigPath, agentKubeconfig(clusters)); err != nil {
-		return err
+		shortenDeadlines(o, clusters)
+		return fmt.Errorf("%w%s", err, teardownHint(clusters))
 	}
 	fmt.Fprintf(o.Out, "wrote %s (contexts: %s; expires %s)\n", o.KubeconfigPath, strings.Join(names(clusters), ", "), clock(expiry))
 	st.Kubeconfig, st.Expiry = o.KubeconfigPath, expiry
@@ -162,6 +157,56 @@ func Run(ctx context.Context, o Options) error {
 		fmt.Fprintf(o.Out, "\nwrote %s\n", o.InstructionsPath)
 	}
 	return collectorErr
+}
+
+// provision installs everything, mints the tokens and writes the agent kubeconfig.
+// It returns the earliest token expiry.
+func provision(ctx context.Context, o Options, st *state.File, clusters []*cluster) (time.Time, error) {
+	if err := readEarlierExpiries(ctx, o, clusters); err != nil {
+		return time.Time{}, err
+	}
+	// The privileged collector starts only after every reaper has shown that it can remove it.
+	if err := installAll(ctx, o, st, clusters, startReaper); err != nil {
+		return time.Time{}, err
+	}
+	if err := waitReapers(ctx, o, clusters); err != nil {
+		return time.Time{}, err
+	}
+	if err := installAll(ctx, o, st, clusters, grantAccess); err != nil {
+		return time.Time{}, err
+	}
+	expiry, err := mintTokens(ctx, o, clusters)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err := armReapers(ctx, clusters); err != nil {
+		return time.Time{}, err
+	}
+	if err := state.WriteFileAtomic(o.KubeconfigPath, agentKubeconfig(clusters)); err != nil {
+		return time.Time{}, err
+	}
+	return expiry, nil
+}
+
+// installAll runs install on each cluster. install calls record to save that cluster's state.
+func installAll(ctx context.Context, o Options, st *state.File, clusters []*cluster, install func(context.Context, Options, *cluster, func() error) error) error {
+	for _, c := range clusters {
+		record := func() error {
+			st.Put(c.record)
+			return state.Save(o.StatePath, st)
+		}
+		if err := install(ctx, o, c, record); err != nil {
+			return fmt.Errorf("%s: %w", c.Name, err)
+		}
+	}
+	return nil
+}
+
+func teardownHint(clusters []*cluster) string {
+	if slices.ContainsFunc(clusters, func(c *cluster) bool { return len(c.record.Objects) > 0 }) {
+		return "; run kglance teardown to remove what was applied"
+	}
+	return ""
 }
 
 func (o *Options) refuseAdminKubeconfigOutputs() error {
@@ -253,17 +298,29 @@ func connectAll(ctx context.Context, o Options, st *state.File) ([]*cluster, err
 	return out, nil
 }
 
-// install applies c's objects and calls record after each one so that a partial install is recorded.
-func install(ctx context.Context, o Options, c *cluster, record func() error) error {
-	if c.Role == state.RoleWorkload {
-		if err := waitNamespaceGoneIfTerminating(ctx, o, c); err != nil {
-			return err
-		}
-	}
-	objs, err := objectsFor(ctx, o, c)
+// grantAccess applies the agent's RBAC and, on workload clusters, the collector.
+func grantAccess(ctx context.Context, o Options, c *cluster, record func() error) error {
+	objs, err := accessObjects(ctx, o, c, c.owner)
 	if err != nil {
 		return err
 	}
+	return applyAll(ctx, o, c, objs, record)
+}
+
+// accessObjects returns the agent's RBAC and, on workload clusters, the collector.
+// ns owns the cluster-scoped ones.
+func accessObjects(ctx context.Context, o Options, c *cluster, ns *corev1.Namespace) ([]kube.Object, error) {
+	if c.Role != state.RoleWorkload {
+		return kube.MgmtObjects(o.MgmtNamespace), nil
+	}
+	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("read ClusterRole view: %w", err)
+	}
+	return kube.WorkloadObjects(ns, view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), nil
+}
+
+func applyAll(ctx context.Context, o Options, c *cluster, objs []kube.Object, record func() error) error {
 	for _, obj := range objs {
 		kind := obj.GetObjectKind().GroupVersionKind().Kind
 		exists, managed, err := kube.Managed(ctx, c.conn.Client, kind, obj.GetNamespace(), obj.GetName())
@@ -287,51 +344,53 @@ func install(ctx context.Context, o Options, c *cluster, record func() error) er
 	return nil
 }
 
-// objectsFor returns the objects setup applies to c.
-func objectsFor(ctx context.Context, o Options, c *cluster) ([]kube.Object, error) {
-	if c.Role != state.RoleWorkload {
-		return kube.MgmtObjects(o.MgmtNamespace), nil
-	}
-	view, err := c.conn.Client.RbacV1().ClusterRoles().Get(ctx, "view", metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("read ClusterRole view: %w", err)
-	}
-	return kube.WorkloadObjects(view.Rules, kube.DaemonSetOptions{Image: o.Image, Cluster: c.Name, Interval: o.Interval}), nil
-}
-
 func recordOf(obj kube.Object) state.Object {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	return state.Object{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
 }
 
-const terminatingTimeout = 2 * time.Minute
-
-func namespaceTerminating(ctx context.Context, cs kubernetes.Interface) (bool, error) {
-	ns, err := cs.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return false, nil
+// poll calls get every o.PollInterval until done or the deadline, and returns the last result.
+func poll[T any](ctx context.Context, o Options, deadline time.Time, get func() (T, error), done func(T) bool) (T, error) {
+	for {
+		v, err := get()
+		if err != nil || done(v) || time.Now().After(deadline) {
+			return v, err
+		}
+		select {
+		case <-ctx.Done():
+			return v, ctx.Err()
+		case <-time.After(o.PollInterval):
+		}
 	}
-	return err == nil && ns.DeletionTimestamp != nil, err
 }
 
-func waitNamespaceGoneIfTerminating(ctx context.Context, o Options, c *cluster) error {
+const terminatingTimeout = 2 * time.Minute
+
+// waitNamespaceGoneIfTerminating returns the workload namespace, or nil once it is gone.
+func waitNamespaceGoneIfTerminating(ctx context.Context, o Options, c *cluster) (*corev1.Namespace, error) {
 	deadline := time.Now().Add(terminatingTimeout)
 	warned := false
 	for {
-		terminating, err := namespaceTerminating(ctx, c.conn.Client)
-		if err != nil || !terminating {
-			return err
+		ns, err := c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if ns.DeletionTimestamp == nil {
+			return ns, nil
 		}
 		if !warned {
 			fmt.Fprintf(o.Err, "%s: waiting for namespace %s to finish terminating\n", c.Name, kube.Namespace)
 			warned = true
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("namespace %s still terminating after %v", kube.Namespace, terminatingTimeout)
+			return nil, fmt.Errorf("namespace %s still terminating after %v", kube.Namespace, terminatingTimeout)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(o.PollInterval):
 		}
 	}

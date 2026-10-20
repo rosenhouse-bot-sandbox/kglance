@@ -36,6 +36,7 @@ Give the agent `agent.kubeconfig` and `agent.md`.
 The instructions tell it which context does what and how to pull the socket snapshots.
 Tokens last one hour by default; run `setup` again to mint new ones.
 
+When the tokens expire, each workload cluster removes kglance on its own.
 When the agent is done, remove everything and revoke its tokens:
 
 ```bash

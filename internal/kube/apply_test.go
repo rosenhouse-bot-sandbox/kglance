@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 func TestApplyCreatesAndReappliesEveryWorkloadObject(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
-	objs := WorkloadObjects(nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute})
+	objs := allWorkloadObjects()
 	for range 2 {
 		for _, o := range objs {
 			if err := Apply(ctx, cs, o); err != nil {
@@ -31,6 +32,14 @@ func TestApplyCreatesAndReappliesEveryWorkloadObject(t *testing.T) {
 	if _, err := cs.CoreV1().Namespaces().Get(ctx, Namespace, metav1.GetOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := cs.AppsV1().Deployments(Namespace).Get(ctx, ReaperDeployment, metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func allWorkloadObjects() []Object {
+	ns := NamespaceObject(time.Now(), time.Time{})
+	return slices.Concat([]Object{ns}, ReaperObjects("i"), WorkloadObjects(ns, nil, DaemonSetOptions{Image: "i", Cluster: "c", Interval: time.Minute}))
 }
 
 func TestApplyUpdatesChangedSpec(t *testing.T) {
@@ -49,7 +58,7 @@ func TestApplyUpdatesChangedSpec(t *testing.T) {
 func TestDeleteRemovesEachKindAndTreatsNotFoundAsSuccess(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset()
-	objs := WorkloadObjects(nil, DaemonSetOptions{Image: "i", Interval: time.Minute})
+	objs := allWorkloadObjects()
 	for _, o := range objs {
 		Apply(ctx, cs, o)
 	}
@@ -69,6 +78,9 @@ func TestDeleteRemovesEachKindAndTreatsNotFoundAsSuccess(t *testing.T) {
 	}
 	if _, err := cs.CoreV1().ServiceAccounts(Namespace).Get(ctx, AgentSA, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("sa still there: %v", err)
+	}
+	if _, err := cs.AppsV1().Deployments(Namespace).Get(ctx, ReaperDeployment, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("deployment still there: %v", err)
 	}
 }
 

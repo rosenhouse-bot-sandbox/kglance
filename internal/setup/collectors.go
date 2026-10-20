@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func rolledOut(ds *appsv1.DaemonSet) bool {
+func daemonSetRolledOut(ds *appsv1.DaemonSet) bool {
 	s := ds.Status
 	return s.ObservedGeneration >= ds.Generation && s.DesiredNumberScheduled > 0 &&
 		s.UpdatedNumberScheduled == s.DesiredNumberScheduled && s.NumberReady == s.DesiredNumberScheduled
@@ -35,7 +35,7 @@ func reportCollectors(ctx context.Context, o Options, clusters []*cluster) error
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
-		if !rolledOut(ds) {
+		if !daemonSetRolledOut(ds) {
 			fmt.Fprintf(o.Err, "warning: %s: socket collector ready on %d/%d nodes after %v\n",
 				c.Name, ds.Status.NumberReady, ds.Status.DesiredNumberScheduled, o.Wait)
 			notReady = append(notReady, c.Name)
@@ -57,20 +57,9 @@ func reportCollectors(ctx context.Context, o Options, clusters []*cluster) error
 }
 
 func waitRollout(ctx context.Context, o Options, c *cluster, deadline time.Time) (*appsv1.DaemonSet, error) {
-	for {
-		ds, err := c.conn.Client.AppsV1().DaemonSets(kube.Namespace).Get(ctx, kube.CollectorDS, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		if rolledOut(ds) || time.Now().After(deadline) {
-			return ds, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(o.PollInterval):
-		}
-	}
+	return poll(ctx, o, deadline, func() (*appsv1.DaemonSet, error) {
+		return c.conn.Client.AppsV1().DaemonSets(kube.Namespace).Get(ctx, kube.CollectorDS, metav1.GetOptions{})
+	}, daemonSetRolledOut)
 }
 
 func readyNodesByRole(ctx context.Context, c *cluster) (controlPlane, workers int, err error) {
