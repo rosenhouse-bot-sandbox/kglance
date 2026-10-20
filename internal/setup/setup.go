@@ -85,6 +85,9 @@ func (o *Options) Validate() error {
 	if o.Interval <= 0 {
 		return errors.New("--interval must be positive")
 	}
+	if o.Wait < 0 {
+		return errors.New("--wait must not be negative")
+	}
 	if o.Image == "" {
 		return errors.New("--image must not be empty")
 	}
@@ -105,9 +108,11 @@ type cluster struct {
 	record    state.Cluster
 	token     string
 	expiry    time.Time
+	// earlier is the workload namespace that earlier setups left, or nil.
+	earlier *corev1.Namespace
 	// earlierExpiry is when the tokens of earlier setups expire, or zero.
 	earlierExpiry time.Time
-	// owner is the workload namespace, which owns the cluster-scoped objects.
+	// owner is the workload namespace whose deadline setup set. It owns the cluster-scoped objects.
 	owner *corev1.Namespace
 }
 
@@ -129,9 +134,9 @@ func Run(ctx context.Context, o Options) error {
 	if o.DryRun {
 		return dryRun(ctx, o, clusters)
 	}
-	expiry, err := writeAgentKubeconfig(ctx, o, st, clusters)
+	expiry, err := provision(ctx, o, st, clusters)
 	if err != nil {
-		disarmReapers(o, clusters)
+		shortenDeadlines(o, clusters)
 		return fmt.Errorf("%w%s", err, teardownHint(clusters))
 	}
 	fmt.Fprintf(o.Out, "wrote %s (contexts: %s; expires %s)\n", o.KubeconfigPath, strings.Join(names(clusters), ", "), clock(expiry))
@@ -154,9 +159,9 @@ func Run(ctx context.Context, o Options) error {
 	return collectorErr
 }
 
-// writeAgentKubeconfig installs everything, mints the tokens and writes the agent kubeconfig.
+// provision installs everything, mints the tokens and writes the agent kubeconfig.
 // It returns the earliest token expiry.
-func writeAgentKubeconfig(ctx context.Context, o Options, st *state.File, clusters []*cluster) (time.Time, error) {
+func provision(ctx context.Context, o Options, st *state.File, clusters []*cluster) (time.Time, error) {
 	if err := readEarlierExpiries(ctx, o, clusters); err != nil {
 		return time.Time{}, err
 	}

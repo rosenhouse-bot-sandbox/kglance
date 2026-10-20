@@ -521,6 +521,7 @@ func TestValidate(t *testing.T) {
 		"ttl too short": func(o *Options) { o.TTL = 9 * time.Minute },
 		"ttl too long":  func(o *Options) { o.TTL = 8*time.Hour + time.Second },
 		"interval":      func(o *Options) { o.Interval = 0 },
+		"negative wait": func(o *Options) { o.Wait = -time.Second },
 		"image":         func(o *Options) { o.Image = "" },
 		"namespace":     func(o *Options) { o.MgmtNamespace = "Not_A_Name" },
 		"no namespace":  func(o *Options) { o.MgmtNamespace = "" },
@@ -846,9 +847,17 @@ func TestRerunKeepsTheDeadlineOfALongerLivedEarlierToken(t *testing.T) {
 	}
 	o.TTL = time.Hour
 	fc := h.clusters["wl1"]
+	var atMint time.Time
+	fc.cs.PrependReactor("create", "serviceaccounts", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		atMint = reaperDeadline(t, fc)
+		return false, nil, nil
+	})
 	for range 2 {
 		if err := Run(context.Background(), o); err != nil {
 			t.Fatal(err)
+		}
+		if !atMint.Equal(now.Add(2 * time.Hour)) {
+			t.Errorf("deadline before minting %v", atMint)
 		}
 		if got := reaperDeadline(t, fc); !got.Equal(now.Add(2 * time.Hour)) {
 			t.Errorf("deadline %v", got)
@@ -1096,6 +1105,7 @@ func TestRunLetsTheReaperRemoveWhatAFailedSetupApplied(t *testing.T) {
 		wantStderr string
 	}{
 		"collector denied": {fail: func(h *harness, o *Options) { failDaemonSetApply(h.clusters["wl1"]) }},
+		"token denied":     {fail: func(h *harness, o *Options) { h.clusters["wl2"].tokenNS = "elsewhere" }},
 		"kubeconfig not written": {fail: func(h *harness, o *Options) {
 			o.KubeconfigPath = filepath.Join(h.dir, "missing", "agent.kubeconfig")
 		}},
@@ -1128,6 +1138,56 @@ func TestRunLetsTheReaperRemoveWhatAFailedSetupApplied(t *testing.T) {
 				t.Errorf("stderr %q", h.err.String())
 			}
 		})
+	}
+}
+
+func TestRunRestoresTheEarlierDeadlineIfItCannotReadTheNamespaceBack(t *testing.T) {
+	h := newHarness(t)
+	o := h.options(wl1)
+	o.TTL = 10 * time.Minute
+	if err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	fc := h.clusters["wl1"]
+	patched, failed := false, false
+	fc.cs.PrependReactor("patch", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patched = true
+		return false, nil, nil
+	})
+	fc.cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if patched && !failed {
+			failed = true
+			return true, nil, errors.New("apiserver down")
+		}
+		return false, nil, nil
+	})
+	if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "wl1: apiserver down") {
+		t.Fatalf("err %v", err)
+	}
+	if got := reaperDeadline(t, fc); !got.Equal(now.Add(10 * time.Minute)) {
+		t.Errorf("deadline %v, want the earlier token's expiry", got)
+	}
+}
+
+func TestRunFailsIfItCannotReadTheNamespaceToSetItsDeadline(t *testing.T) {
+	h := newHarness(t)
+	fc := h.clusters["wl1"]
+	minted := false
+	fc.cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if minted {
+			return true, nil, errors.New("apiserver down")
+		}
+		return false, nil, nil
+	})
+	fc.cs.PrependReactor("create", "serviceaccounts", func(k8stesting.Action) (bool, runtime.Object, error) {
+		minted = true
+		return false, nil, nil
+	})
+	if err := Run(context.Background(), h.options(wl1)); err == nil || !strings.Contains(err.Error(), "wl1: set reaper deadline: apiserver down") {
+		t.Fatalf("err %v", err)
+	}
+	if !strings.Contains(h.err.String(), "warning: wl1: shorten reaper deadline: apiserver down") {
+		t.Errorf("stderr %q", h.err.String())
 	}
 }
 

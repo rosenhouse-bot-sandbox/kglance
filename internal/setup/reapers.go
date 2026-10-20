@@ -36,9 +36,11 @@ func readEarlierExpiries(ctx context.Context, o Options, clusters []*cluster) er
 		if err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
-		if prev == nil {
+		// applyAll refuses a namespace that kglance does not manage, so no earlier setup left it.
+		if prev == nil || prev.Labels[kube.ManagedByLabel] != kube.ManagedByValue {
 			continue
 		}
+		c.earlier = prev
 		// Setup never mints a token that expires after now + MaxTTL, so it ignores a later expiry.
 		if at, err := kube.TimeAnnotation(prev, kube.TokensExpireAtAnnotation); err == nil && !at.After(o.Now().Add(MaxTTL)) {
 			c.earlierExpiry = at
@@ -54,19 +56,21 @@ func startReaper(ctx context.Context, o Options, c *cluster, record func() error
 		// Recording mgmt first keeps the state file, and so teardown, in setup's cluster order.
 		return record()
 	}
-	// If setup dies before it arms or disarms the reaper, this deadline removes what setup applied.
+	// If setup dies before it sets or shortens the deadline again, this deadline removes what setup applied.
 	provisional := later(c.earlierExpiry, o.Now().Add(o.Wait+setupMargin))
+	// Until setup reads the namespace back, shortenDeadlines restores the earlier namespace's deadline.
+	c.owner = c.earlier
 	if err := applyAll(ctx, o, c, []kube.Object{kube.NamespaceObject(provisional, c.earlierExpiry)}, record); err != nil {
 		return err
 	}
-	var err error
-	c.owner, err = c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
+	ns, err := c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	if c.owner.DeletionTimestamp != nil {
+	if ns.DeletionTimestamp != nil {
 		return errNamespaceChanged
 	}
+	c.owner = ns
 	if err := deleteObjectsOwnedByEarlierNamespace(ctx, c); err != nil {
 		return fmt.Errorf("%s: %w", deleteEarlierStep, err)
 	}
@@ -194,18 +198,19 @@ func armReapers(ctx context.Context, clusters []*cluster) error {
 	return nil
 }
 
-const disarmTimeout = 30 * time.Second
+const shortenTimeout = 30 * time.Second
 
-// disarmReapers moves each deadline that setup set back to when earlier setups' tokens expire, so that the reaper removes what a failed setup applied.
+// shortenDeadlines moves each deadline that setup set back to when earlier setups' tokens expire, so that the reaper removes what a failed setup applied.
 // It runs even if setup was cancelled.
-func disarmReapers(o Options, clusters []*cluster) {
-	ctx, cancel := context.WithTimeout(context.Background(), disarmTimeout)
-	defer cancel()
+func shortenDeadlines(o Options, clusters []*cluster) {
 	for _, c := range clusters {
 		if c.owner == nil {
 			continue
 		}
-		if err := setDeadline(ctx, c, later(c.earlierExpiry, o.Now()), c.earlierExpiry); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shortenTimeout)
+		err := setDeadline(ctx, c, later(c.earlierExpiry, o.Now()), c.earlierExpiry)
+		cancel()
+		if err != nil {
 			fmt.Fprintf(o.Err, "warning: %s: shorten reaper deadline: %v\n", c.Name, err)
 		}
 	}
