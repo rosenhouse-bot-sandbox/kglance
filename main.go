@@ -41,7 +41,8 @@ Creates read-only service accounts on each cluster, starts the socket collector 
 workload clusters, writes a kubeconfig and instructions for the agent.
 Re-running setup mints fresh tokens without restarting the collector.
 When the tokens expire, each workload cluster deletes everything setup created there,
-including the kglance namespace and anything in it. Run teardown to clean up the
+including the kglance namespace and anything in it. If setup fails, it does so right away,
+unless an earlier setup's tokens are still valid. Run teardown to clean up the
 management cluster.
 
 --context, or the current context by default, names the Cluster API management cluster.

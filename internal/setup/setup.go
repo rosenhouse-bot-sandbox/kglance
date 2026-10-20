@@ -129,25 +129,10 @@ func Run(ctx context.Context, o Options) error {
 	if o.DryRun {
 		return dryRun(ctx, o, clusters)
 	}
-	// The privileged collector starts only after every reaper has shown that it can remove it.
-	if err := installAll(ctx, o, st, clusters, startReaper); err != nil {
-		return err
-	}
-	if err := waitReapers(ctx, o, clusters); err != nil {
-		return fmt.Errorf("%w%s", err, teardownHint(clusters))
-	}
-	if err := installAll(ctx, o, st, clusters, grantAccess); err != nil {
-		return err
-	}
-	expiry, err := mintTokens(ctx, o, clusters)
+	expiry, err := writeAgentKubeconfig(ctx, o, st, clusters)
 	if err != nil {
-		return err
-	}
-	if err := armReapers(ctx, clusters); err != nil {
-		return err
-	}
-	if err := state.WriteFileAtomic(o.KubeconfigPath, agentKubeconfig(clusters)); err != nil {
-		return err
+		disarmReapers(o, clusters)
+		return fmt.Errorf("%w%s", err, teardownHint(clusters))
 	}
 	fmt.Fprintf(o.Out, "wrote %s (contexts: %s; expires %s)\n", o.KubeconfigPath, strings.Join(names(clusters), ", "), clock(expiry))
 	st.Kubeconfig, st.Expiry = o.KubeconfigPath, expiry
@@ -169,6 +154,35 @@ func Run(ctx context.Context, o Options) error {
 	return collectorErr
 }
 
+// writeAgentKubeconfig installs everything, mints the tokens and writes the agent kubeconfig.
+// It returns the earliest token expiry.
+func writeAgentKubeconfig(ctx context.Context, o Options, st *state.File, clusters []*cluster) (time.Time, error) {
+	if err := readEarlierExpiries(ctx, o, clusters); err != nil {
+		return time.Time{}, err
+	}
+	// The privileged collector starts only after every reaper has shown that it can remove it.
+	if err := installAll(ctx, o, st, clusters, startReaper); err != nil {
+		return time.Time{}, err
+	}
+	if err := waitReapers(ctx, o, clusters); err != nil {
+		return time.Time{}, err
+	}
+	if err := installAll(ctx, o, st, clusters, grantAccess); err != nil {
+		return time.Time{}, err
+	}
+	expiry, err := mintTokens(ctx, o, clusters)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err := armReapers(ctx, clusters); err != nil {
+		return time.Time{}, err
+	}
+	if err := state.WriteFileAtomic(o.KubeconfigPath, agentKubeconfig(clusters)); err != nil {
+		return time.Time{}, err
+	}
+	return expiry, nil
+}
+
 // installAll runs install on each cluster. install calls record to save that cluster's state.
 func installAll(ctx context.Context, o Options, st *state.File, clusters []*cluster, install func(context.Context, Options, *cluster, func() error) error) error {
 	for _, c := range clusters {
@@ -177,7 +191,7 @@ func installAll(ctx context.Context, o Options, st *state.File, clusters []*clus
 			return state.Save(o.StatePath, st)
 		}
 		if err := install(ctx, o, c, record); err != nil {
-			return fmt.Errorf("%s: %w%s", c.Name, err, teardownHint(clusters))
+			return fmt.Errorf("%s: %w", c.Name, err)
 		}
 	}
 	return nil

@@ -200,9 +200,9 @@ func TestReapReportsReadFailure(t *testing.T) {
 	}
 }
 
-func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
+func TestRunReapsEveryIntervalDespiteFailuresAndStopsWhenCancelled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		cs := fake.NewClientset(expiring(time.Now().Add(11 * time.Second)))
+		cs := fake.NewClientset(expiring(time.Now().Add(time.Second)))
 		failed := false
 		cs.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
 			if !failed {
@@ -218,15 +218,15 @@ func TestRunReapsOnceTheDeadlinePassesAndStopsWhenCancelled(t *testing.T) {
 			(&Reaper{Client: cs, Now: time.Now}).Run(ctx)
 			close(done)
 		}()
-		time.Sleep(10 * time.Second)
+		time.Sleep(9 * time.Second)
 		synctest.Wait()
 		if !nsExists(t, cs) {
-			t.Fatal("reaped before the deadline")
+			t.Fatal("reaped before the first tick")
 		}
-		time.Sleep(10 * time.Second)
+		time.Sleep(time.Second)
 		synctest.Wait()
 		if nsExists(t, cs) {
-			t.Fatal("not reaped after the deadline")
+			t.Fatal("not reaped at the first tick")
 		}
 		cancel()
 		synctest.Wait()

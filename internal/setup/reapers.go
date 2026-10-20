@@ -26,6 +26,27 @@ func later(a, b time.Time) time.Time {
 	return b
 }
 
+// readEarlierExpiries waits out terminating workload namespaces and reads when earlier setups' tokens expire.
+func readEarlierExpiries(ctx context.Context, o Options, clusters []*cluster) error {
+	for _, c := range clusters {
+		if c.Role != state.RoleWorkload {
+			continue
+		}
+		prev, err := waitNamespaceGoneIfTerminating(ctx, o, c)
+		if err != nil {
+			return fmt.Errorf("%s: %w", c.Name, err)
+		}
+		if prev == nil {
+			continue
+		}
+		// Setup never mints a token that expires after now + MaxTTL, so it ignores a later expiry.
+		if at, err := kube.TimeAnnotation(prev, kube.TokensExpireAtAnnotation); err == nil && !at.After(o.Now().Add(MaxTTL)) {
+			c.earlierExpiry = at
+		}
+	}
+	return nil
+}
+
 // startReaper applies a workload cluster's namespace and reaper, after deleting cluster-scoped objects that an earlier namespace owns.
 // It calls record after each object, so that a partial install is recorded.
 func startReaper(ctx context.Context, o Options, c *cluster, record func() error) error {
@@ -33,21 +54,12 @@ func startReaper(ctx context.Context, o Options, c *cluster, record func() error
 		// Recording mgmt first keeps the state file, and so teardown, in setup's cluster order.
 		return record()
 	}
-	prev, err := waitNamespaceGoneIfTerminating(ctx, o, c)
-	if err != nil {
-		return err
-	}
-	if prev != nil {
-		// Setup never mints a token that expires after now + MaxTTL, so it ignores a later expiry.
-		if at, err := kube.TimeAnnotation(prev, kube.TokensExpireAtAnnotation); err == nil && !at.After(o.Now().Add(MaxTTL)) {
-			c.earlierExpiry = at
-		}
-	}
-	// Until armReapers replaces it, this deadline outlasts setup and removes a failed one.
+	// If setup dies before it arms or disarms the reaper, this deadline removes what setup applied.
 	provisional := later(c.earlierExpiry, o.Now().Add(o.Wait+setupMargin))
 	if err := applyAll(ctx, o, c, []kube.Object{kube.NamespaceObject(provisional, c.earlierExpiry)}, record); err != nil {
 		return err
 	}
+	var err error
 	c.owner, err = c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -142,16 +154,19 @@ func reaperProblem(ctx context.Context, c *cluster) string {
 	if err != nil {
 		return ""
 	}
-	events, err := core.Events(kube.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return ""
-	}
-	for _, p := range pods.Items {
+	unready := slices.DeleteFunc(pods.Items, func(p corev1.Pod) bool { return podReady(&p) })
+	for _, p := range unready {
 		for _, s := range p.Status.ContainerStatuses {
 			if w := s.State.Waiting; w != nil {
 				return fmt.Sprintf("; pod %s is waiting: %s: %s", p.Name, w.Reason, w.Message)
 			}
 		}
+	}
+	events, err := core.Events(kube.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ""
+	}
+	for _, p := range unready {
 		var latest *corev1.Event
 		for i, e := range events.Items {
 			if e.InvolvedObject.Name == p.Name && e.Reason == "Unhealthy" && (latest == nil || e.LastTimestamp.After(latest.LastTimestamp.Time)) {
@@ -171,14 +186,32 @@ func armReapers(ctx context.Context, clusters []*cluster) error {
 		if c.Role != state.RoleWorkload {
 			continue
 		}
-		if err := armReaper(ctx, c); err != nil {
+		at := later(c.earlierExpiry, c.expiry)
+		if err := setDeadline(ctx, c, at, at); err != nil {
 			return fmt.Errorf("%s: set reaper deadline: %w", c.Name, err)
 		}
 	}
 	return nil
 }
 
-func armReaper(ctx context.Context, c *cluster) error {
+const disarmTimeout = 30 * time.Second
+
+// disarmReapers moves each deadline that setup set back to when earlier setups' tokens expire, so that the reaper removes what a failed setup applied.
+// It runs even if setup was cancelled.
+func disarmReapers(o Options, clusters []*cluster) {
+	ctx, cancel := context.WithTimeout(context.Background(), disarmTimeout)
+	defer cancel()
+	for _, c := range clusters {
+		if c.owner == nil {
+			continue
+		}
+		if err := setDeadline(ctx, c, later(c.earlierExpiry, o.Now()), c.earlierExpiry); err != nil {
+			fmt.Fprintf(o.Err, "warning: %s: shorten reaper deadline: %v\n", c.Name, err)
+		}
+	}
+}
+
+func setDeadline(ctx context.Context, c *cluster, at, tokensExpireAt time.Time) error {
 	ns, err := c.conn.Client.CoreV1().Namespaces().Get(ctx, kube.Namespace, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -186,6 +219,5 @@ func armReaper(ctx context.Context, c *cluster) error {
 	if ns.UID != c.owner.UID || ns.DeletionTimestamp != nil {
 		return errNamespaceChanged
 	}
-	at := later(c.earlierExpiry, c.expiry)
-	return kube.Apply(ctx, c.conn.Client, kube.NamespaceObject(at, at))
+	return kube.Apply(ctx, c.conn.Client, kube.NamespaceObject(at, tokensExpireAt))
 }
