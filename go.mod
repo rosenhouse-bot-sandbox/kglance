@@ -3,9 +3,9 @@ module github.com/rosenhouse-bot-sandbox/kglance
 go 1.26.9
 
 require (
-	k8s.io/api v0.37.1
-	k8s.io/apimachinery v0.37.1
-	k8s.io/client-go v0.37.1
+	k8s.io/api v0.37.2
+	k8s.io/apimachinery v0.37.2
+	k8s.io/client-go v0.37.2
 )
 
 require (
